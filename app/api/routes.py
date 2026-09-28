@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import json
 import re
 import shutil
@@ -7,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Any
 
+import joblib
+import numpy as np
 import pickle
 import subprocess
 import sys
@@ -34,6 +37,9 @@ from app.api.runner import execute_workflow_async
 from app.core.events import event_manager
 from app.tools.mlflow_tools import MLflowTools, is_higher_better
 from app.config import PROJECTS_DIR, MLFLOW_TRACKING_URI
+from app.utils.logger import get_logger
+
+_log = get_logger(__name__)
 
 router = APIRouter()
 
@@ -594,6 +600,187 @@ def get_experiments(project_id: str, session: Session = Depends(get_session)):
         return {"project_id": project_id, "runs": [], "error": str(e)}
 
 
+def transform_raw_test_features(
+    project_id: str,
+    test_df: pd.DataFrame,
+    target_col: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Transforms raw, unprocessed test data using the project's saved feature engineering pipeline.
+
+    1. If `features/feature_pipeline.py` exists, dynamically imports it so any custom
+       transformer classes (e.g. FeatureEngineeringTransformer) are registered in Python's
+       class lookup for unpickling.
+    2. If `features/feature_pipeline.pkl` exists, loads the fitted pipeline with joblib and
+       calls `pipeline.transform(test_df)`.
+    3. If `feature_pipeline.pkl` is absent or fails, falls back to running `feature_pipeline.py`
+       via subprocess.
+    4. If no feature pipeline exists at all, returns `test_df` directly.
+    """
+    features_dir = PROJECTS_DIR / project_id / "features"
+    pipeline_pkl = features_dir / "feature_pipeline.pkl"
+    pipeline_py = features_dir / "feature_pipeline.py"
+    schema_json = features_dir / "feature_schema.json"
+
+    # Step 1: Dynamically import feature_pipeline.py if present
+    pipe_mod = None
+    if pipeline_py.exists():
+        try:
+            spec = importlib.util.spec_from_file_location(f"fe_pipe_{project_id}", pipeline_py)
+            if spec and spec.loader:
+                pipe_mod = importlib.util.module_from_spec(spec)
+                sys.modules[f"fe_pipe_{project_id}"] = pipe_mod
+                spec.loader.exec_module(pipe_mod)
+
+                # Export classes to __main__ so unpickler resolves classes saved under '__main__'
+                main_mod = sys.modules.get("__main__")
+                if main_mod:
+                    for attr in dir(pipe_mod):
+                        if not hasattr(main_mod, attr) and not attr.startswith("__"):
+                            setattr(main_mod, attr, getattr(pipe_mod, attr))
+                _log.debug("[PREDICT] Loaded pipeline module fe_pipe_%s", project_id)
+        except Exception as exc:
+            _log.warning("[PREDICT] Could not dynamically load feature_pipeline.py: %s", exc)
+
+    def _clean_nans_and_infs(df: pd.DataFrame) -> pd.DataFrame:
+        cleaned = df.replace([np.inf, -np.inf], np.nan)
+        if cleaned.isna().any().any():
+            _log.warning("[PREDICT] Transformed features contain NaNs/Infs; imputing with column median/mode")
+            for c in cleaned.columns:
+                if cleaned[c].isna().any():
+                    if pd.api.types.is_numeric_dtype(cleaned[c]):
+                        med = cleaned[c].median()
+                        fill_v = 0.0 if pd.isna(med) else med
+                    else:
+                        m = cleaned[c].mode()
+                        fill_v = m.iloc[0] if not m.empty else "missing"
+                    cleaned[c] = cleaned[c].fillna(fill_v)
+        return cleaned
+
+    # Step 2: Try loading and running fitted pipeline.pkl
+    if pipeline_pkl.exists():
+        try:
+            pipeline = joblib.load(pipeline_pkl)
+            _log.info("[PREDICT] Successfully loaded fitted feature_pipeline.pkl for project %s", project_id)
+
+            test_input = test_df.copy()
+            if target_col and target_col in test_input.columns:
+                test_input = test_input.drop(columns=[target_col])
+
+            # Pre-impute raw test input so transformers without imputer steps don't fail or propagate NaNs
+            if test_input.isna().any().any():
+                _log.info("[PREDICT] Raw test input contains NaNs; applying pre-transform median/mode imputation")
+                for c in test_input.columns:
+                    if test_input[c].isna().any():
+                        if pd.api.types.is_numeric_dtype(test_input[c]):
+                            med = test_input[c].median()
+                            fill_v = 0.0 if pd.isna(med) else med
+                        else:
+                            m = test_input[c].mode()
+                            fill_v = m.iloc[0] if not m.empty else "missing"
+                        test_input[c] = test_input[c].fillna(fill_v)
+
+            try:
+                X_transformed = pipeline.transform(test_input)
+            except Exception as transform_err:
+                # Some custom pipelines expect target_col in df (e.g. `if target_col in df: ...`)
+                if target_col and target_col not in test_input.columns:
+                    _log.debug("[PREDICT] Retrying transform with dummy target col: %s", transform_err)
+                    test_input[target_col] = 0
+                    X_transformed = pipeline.transform(test_input)
+                else:
+                    raise transform_err
+
+            # Convert to DataFrame if result is numpy array
+            if isinstance(X_transformed, pd.DataFrame):
+                out_df = X_transformed
+            elif hasattr(X_transformed, "__array__"):
+                feature_names = None
+                if hasattr(pipeline, "get_feature_names_out"):
+                    try:
+                        feature_names = list(pipeline.get_feature_names_out())
+                    except Exception:
+                        pass
+                if not feature_names and schema_json.exists():
+                    try:
+                        schema_data = json.loads(schema_json.read_text(encoding="utf-8"))
+                        if isinstance(schema_data, list):
+                            feature_names = [x.get("name") for x in schema_data if isinstance(x, dict) and x.get("name") != target_col]
+                        elif isinstance(schema_data, dict):
+                            feature_names = [k for k in schema_data.keys() if k != target_col]
+                    except Exception:
+                        pass
+
+                if feature_names and len(feature_names) == X_transformed.shape[1]:
+                    out_df = pd.DataFrame(X_transformed, columns=feature_names, index=test_df.index)
+                else:
+                    out_df = pd.DataFrame(X_transformed, index=test_df.index)
+            else:
+                out_df = pd.DataFrame(X_transformed, index=test_df.index)
+
+            if target_col and target_col in out_df.columns:
+                out_df = out_df.drop(columns=[target_col])
+
+            out_df = _clean_nans_and_infs(out_df)
+            _log.info("[PREDICT] Transformed raw test data to shape %s via pipeline.pkl", out_df.shape)
+            return out_df
+        except Exception as exc:
+            _log.warning("[PREDICT] Error applying feature_pipeline.pkl, falling back: %s", exc)
+
+    # Step 3: Fallback - Subprocess execution if pipeline_py exists
+    if pipeline_py.exists():
+        _log.info("[PREDICT] Falling back to subprocess transform with feature_pipeline.py")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_in_csv = (Path(tmpdir) / "test_in.csv").resolve()
+            test_out_parquet = (Path(tmpdir) / "test_out.parquet").resolve()
+
+            test_df_copy = test_df.copy()
+            if target_col and target_col not in test_df_copy.columns:
+                test_df_copy[target_col] = 0
+
+            test_df_copy.to_csv(test_in_csv, index=False)
+
+            raw_code = pipeline_py.read_text(encoding="utf-8")
+            in_path_str = str(test_in_csv).replace("\\", "/")
+            out_path_str = str(test_out_parquet).replace("\\", "/")
+
+            mod_code = re.sub(
+                r'(?:RAW_CSV_PATH|DATA_PATH)\s*=\s*r?["\'].*?["\']',
+                f'DATA_PATH = r"{in_path_str}"\nRAW_CSV_PATH = r"{in_path_str}"',
+                raw_code,
+            )
+            mod_code = re.sub(
+                r'(?:PARQUET_OUT_PATH|FEATURE_DATA_PATH)\s*=\s*r?["\'].*?["\']',
+                f'FEATURE_DATA_PATH = r"{out_path_str}"\nPARQUET_OUT_PATH = r"{out_path_str}"',
+                mod_code,
+            )
+
+            run_script = Path(tmpdir) / "run_transform.py"
+            run_script.write_text(mod_code, encoding="utf-8")
+
+            res = subprocess.run([sys.executable, str(run_script)], capture_output=True, text=True)
+            if res.returncode == 0 and test_out_parquet.exists():
+                out_df = pd.read_parquet(test_out_parquet)
+                if target_col and target_col in out_df.columns:
+                    out_df = out_df.drop(columns=[target_col])
+                out_df = _clean_nans_and_infs(out_df)
+                _log.info("[PREDICT] Transformed raw test data to shape %s via subprocess fallback", out_df.shape)
+                return out_df
+            else:
+                err_msg = res.stderr.strip() or res.stdout.strip() or "Feature pipeline execution failed."
+                last_err = err_msg.splitlines()[-1] if err_msg else "Unknown pipeline error"
+                _log.warning("[PREDICT] Subprocess fallback failed: %s", last_err)
+
+    # Step 4: Final fallback (raw data pass-through)
+    _log.info("[PREDICT] No feature pipeline applied; passing raw test features directly")
+    out_df = test_df.copy()
+    if target_col and target_col in out_df.columns:
+        out_df = out_df.drop(columns=[target_col])
+    out_df = _clean_nans_and_infs(out_df)
+    return out_df
+
+
+
 @router.post("/projects/{project_id}/models/{experiment_id}/predict")
 def predict_model(
     project_id: str,
@@ -619,6 +806,9 @@ def predict_model(
 
     if len(test_df) == 0:
         raise HTTPException(status_code=400, detail="Test file contains 0 data rows.")
+
+    # Strip column names of surrounding whitespace
+    test_df.columns = [c.strip() if isinstance(c, str) else c for c in test_df.columns]
 
     # 2. Determine target column and profile info
     target_col = None
@@ -655,7 +845,7 @@ def predict_model(
             pass
 
     if training_feature_cols:
-        id_candidates = {"id", "passengerid", "row_id", "index"}
+        id_candidates = {"id", "passengerid", "row_id", "index", "id_column"}
         missing_cols = [
             c for c in training_feature_cols
             if c not in test_df.columns and c.lower() not in id_candidates
@@ -735,23 +925,32 @@ def predict_model(
             for art in artifacts:
                 if art.path.endswith(".pkl"):
                     local_art_path = client.download_artifacts(target_run.info.run_id, art.path)
-                    with open(local_art_path, "rb") as mf:
-                        model = pickle.load(mf)
+                    try:
+                        with open(local_art_path, "rb") as mf:
+                            model = pickle.load(mf)
+                    except Exception:
+                        model = joblib.load(local_art_path)
                     break
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.warning("[PREDICT] Error downloading/unpickling MLflow artifact: %s", exc)
 
     if model is None and models_dir.exists():
         run_name = target_run.info.run_name if target_run else ""
         candidate_files = list(models_dir.glob("*.pkl"))
         for cf in candidate_files:
             if cf.stem in run_name or run_name in cf.stem:
-                with open(cf, "rb") as mf:
-                    model = pickle.load(mf)
+                try:
+                    with open(cf, "rb") as mf:
+                        model = pickle.load(mf)
+                except Exception:
+                    model = joblib.load(cf)
                 break
         if model is None and candidate_files:
-            with open(candidate_files[0], "rb") as mf:
-                model = pickle.load(mf)
+            try:
+                with open(candidate_files[0], "rb") as mf:
+                    model = pickle.load(mf)
+            except Exception:
+                model = joblib.load(candidate_files[0])
 
     if model is None:
         raise HTTPException(
@@ -759,68 +958,52 @@ def predict_model(
             detail=f"Trained model artifact for '{experiment_id}' could not be found or loaded.",
         )
 
-    # 7. Apply feature pipeline transform to test_df
-    pipeline_py = PROJECTS_DIR / project_id / "features" / "feature_pipeline.py"
-    if not pipeline_py.exists():
-        raise HTTPException(
-            status_code=404,
-            detail="Feature pipeline script ('features/feature_pipeline.py') not found for this project.",
-        )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        test_in_csv = (Path(tmpdir) / "test_in.csv").resolve()
-        test_out_parquet = (Path(tmpdir) / "test_out.parquet").resolve()
-
-        # Add dummy target column if not present so pipeline validation passes
-        test_df_copy = test_df.copy()
-        if target_col not in test_df_copy.columns:
-            test_df_copy[target_col] = 0
-
-        test_df_copy.to_csv(test_in_csv, index=False)
-
-        raw_code = pipeline_py.read_text(encoding="utf-8")
-        in_path_str = str(test_in_csv).replace("\\", "/")
-        out_path_str = str(test_out_parquet).replace("\\", "/")
-
-        mod_code = re.sub(
-            r'RAW_CSV_PATH\s*=\s*r?["\'].*?["\']',
-            f'RAW_CSV_PATH = r"{in_path_str}"',
-            raw_code,
-        )
-        mod_code = re.sub(
-            r'PARQUET_OUT_PATH\s*=\s*r?["\'].*?["\']',
-            f'PARQUET_OUT_PATH = r"{out_path_str}"',
-            mod_code,
-        )
-
-        run_script = Path(tmpdir) / "run_transform.py"
-        run_script.write_text(mod_code, encoding="utf-8")
-
-        res = subprocess.run([sys.executable, str(run_script)], capture_output=True, text=True)
-        if res.returncode != 0 or not test_out_parquet.exists():
-            err_msg = res.stderr.strip() or res.stdout.strip() or "Feature pipeline execution failed."
-            last_err = err_msg.splitlines()[-1] if err_msg else "Unknown pipeline error"
-            raise HTTPException(status_code=400, detail=f"Feature transformation failed: {last_err}")
-
-        out_df = pd.read_parquet(test_out_parquet)
-        if target_col in out_df.columns:
-            X_test = out_df.drop(columns=[target_col])
-        else:
-            X_test = out_df
+    # 7. Apply feature pipeline transform to raw test_df
+    try:
+        X_test = transform_raw_test_features(project_id, test_df, target_col=target_col)
+    except Exception as exc:
+        _log.exception("[PREDICT] Feature transformation failed: %s", exc)
+        raise HTTPException(status_code=400, detail=f"Feature transformation failed: {str(exc)}")
 
     # 8. Align feature columns with model expectations
+    feature_names = None
     if hasattr(model, "feature_names_in_"):
-        expected_cols = list(model.feature_names_in_)
-        missing_features = [c for c in expected_cols if c not in X_test.columns]
+        feature_names = list(model.feature_names_in_)
+    elif hasattr(model, "steps") and len(model.steps) > 0:
+        first_step = model.steps[0][1]
+        if hasattr(first_step, "feature_names_in_"):
+            feature_names = list(first_step.feature_names_in_)
+
+    if feature_names:
+        missing_features = [c for c in feature_names if c not in X_test.columns]
         if missing_features:
+            _log.info(
+                "[PREDICT] Adding %d missing features with default 0.0: %s",
+                len(missing_features), missing_features,
+            )
             missing_df = pd.DataFrame(0.0, index=X_test.index, columns=missing_features)
             X_test = pd.concat([X_test, missing_df], axis=1)
-        X_test = X_test[expected_cols]
+        X_test = X_test[feature_names]
+
+    # Clean any inf or NaN values before passing to estimator
+    X_test = X_test.replace([np.inf, -np.inf], np.nan)
+    if X_test.isna().any().any():
+        nan_cols = [c for c in X_test.columns if X_test[c].isna().any()]
+        _log.warning("[PREDICT] Final guard: detected NaNs in features %s; filling with median/0.0", nan_cols)
+        for c in nan_cols:
+            if pd.api.types.is_numeric_dtype(X_test[c]):
+                med = X_test[c].median()
+                fill_v = 0.0 if pd.isna(med) else med
+            else:
+                m = X_test[c].mode()
+                fill_v = m.iloc[0] if not m.empty else "missing"
+            X_test[c] = X_test[c].fillna(fill_v)
 
     # 9. Model inference
     try:
         preds = model.predict(X_test)
     except Exception as e:
+        _log.exception("[PREDICT] Model inference failed: %s", e)
         raise HTTPException(status_code=500, detail=f"Model inference failed: {str(e)}")
 
     # 10. Format and return submission CSV
@@ -829,6 +1012,10 @@ def predict_model(
         target_col: preds,
     })
     csv_str = submission_df.to_csv(index=False)
+    _log.info(
+        "[PREDICT] Generated predictions successfully | project=%s model=%s rows=%d",
+        project_id, experiment_id, len(preds),
+    )
 
     return Response(
         content=csv_str,

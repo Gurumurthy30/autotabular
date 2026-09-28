@@ -8,11 +8,14 @@ from sqlmodel import Session, select
 from app.db.session import engine
 from app.db.models import WorkflowRun, EDAFinding, FeatureVersion, SupervisorMemoryRecord, ArtifactIndex
 from app.core.events import event_manager
-from app.core.state import ProjectState, TaskType
+from app.core.state import ProjectState, TaskType, to_evidence_str
 from app.core.model_router import ModelRouter
 from app.tools.dataset_tools import DatasetTools
 from app.graph.build_graph import build_ml_graph
 from app.config import PROJECTS_DIR
+from app.utils.logger import get_logger
+
+_log = get_logger(__name__)
 
 
 def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, target_column: str | None, target_metric: str | None, constraints: dict | None = None) -> None:
@@ -20,6 +23,11 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
     start_time = datetime.now(timezone.utc)
     constraints = constraints or {}
     max_iterations = constraints.get("max_iterations", 3)
+
+    _log.info(
+        "[RUNNER] Workflow started | project=%s run=%s dataset=%s target=%s metric=%s max_iter=%s",
+        project_id, run_id, dataset_version, target_column, target_metric, max_iterations,
+    )
 
     # 1. Update run to RUNNING
     with Session(engine) as session:
@@ -212,14 +220,14 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
         with Session(engine) as session:
             for item in findings_list:
                 finding_rec = EDAFinding(
-                    id=f"eda_{project_id}_{run_id}_{item.get('category')}_{hash(item.get('finding'))}",
+                    id=f"eda_{project_id}_{run_id}_{item.get('category')}_{hash(str(item.get('finding')))}",
                     project_id=project_id,
                     run_id=run_id,
                     category=item.get("category", "General"),
-                    finding=item.get("finding", ""),
-                    evidence=item.get("evidence", ""),
-                    implication=item.get("implication", ""),
-                    recommendation=item.get("recommendation", ""),
+                    finding=str(item.get("finding", "")),
+                    evidence=to_evidence_str(item.get("evidence", "")),
+                    implication=str(item.get("implication", "")),
+                    recommendation=str(item.get("recommendation", "")),
                     created_at=datetime.now(timezone.utc),
                 )
                 session.merge(finding_rec)
@@ -291,6 +299,10 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
                 session.commit()
 
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        _log.info(
+            "[RUNNER] Workflow completed | project=%s run=%s | status=SUCCESS | elapsed=%.1fs",
+            project_id, run_id, elapsed,
+        )
         event_manager.emit_event(
             project_id=project_id,
             run_id=run_id,
@@ -308,6 +320,10 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
     except (Exception, KeyboardInterrupt, asyncio.CancelledError) as exc:
         is_interrupted = isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError))
         err_msg = "Workflow execution cancelled or interrupted" if is_interrupted else str(exc)
+        _log.exception(
+            "[RUNNER] Workflow terminated | project=%s run=%s | error=%s",
+            project_id, run_id, err_msg,
+        )
         try:
             with Session(engine) as session:
                 run_record = session.get(WorkflowRun, run_id)
@@ -326,8 +342,8 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
                 message=f"Workflow run terminated: {err_msg}",
                 data={"status": "FAILED", "error": err_msg},
             )
-        except Exception:
-            pass
+        except Exception as inner_exc:
+            _log.exception("[RUNNER] Failed to update DB on workflow failure: %s", inner_exc)
 
         if is_interrupted:
             raise exc

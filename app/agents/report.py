@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 from typing import Any
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -8,6 +9,9 @@ from app.core.model_router import ModelRouter
 from app.core.memory import get_stage_context
 from app.tools.registry import ToolRegistry
 from app.config import PROJECTS_DIR
+from app.utils.logger import get_logger
+
+_log = get_logger(__name__)
 
 
 REPORT_SYSTEM_PROMPT = """You are an expert Technical ML Reporting Agent.
@@ -28,7 +32,11 @@ CRITICAL RULES:
 
 def run_report(state: ProjectState, router: ModelRouter, registry: ToolRegistry) -> dict[str, Any]:
     """Generates final_report.md and summary.json from completed pipeline artifacts."""
+    stage_start = time.monotonic()
     project_id = state["project_id"]
+    run_id = state.get("run_id", "unknown")
+    _log.info("[REPORT] Stage started | project=%s run=%s", project_id, run_id)
+
     tools = registry.get_tools_for_role("report")
     ctx = get_stage_context(state, "report")
 
@@ -48,8 +56,8 @@ Generate a structured executive report summary covering the objective, best mode
             SystemMessage(content=REPORT_SYSTEM_PROMPT),
             HumanMessage(content=summary_prompt),
         ])
-    except Exception as e:
-        print(f"[REPORT] Structured summary warning: {e}", flush=True)
+    except Exception as exc:
+        _log.exception("[REPORT] Structured summary failed: %s", exc)
 
     if report_summary is None:
         report_summary = ReportSummaryOutput(
@@ -119,6 +127,9 @@ Format clearly with markdown headings, bullet points, and tables. ZERO PLOTS.
 
     artifacts_list = list(state.get("artifacts", []))
     artifacts_list.extend([art_sum, art_rep])
+
+    elapsed = time.monotonic() - stage_start
+    _log.info("[REPORT] Stage completed | project=%s run=%s | duration=%.2fs", project_id, run_id, elapsed)
 
     return {
         "current_stage": "report",

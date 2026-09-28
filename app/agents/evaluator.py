@@ -1,4 +1,6 @@
 import json
+import hashlib
+import time
 from pathlib import Path
 from typing import Any
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -8,6 +10,9 @@ from app.core.model_router import ModelRouter
 from app.core.memory import get_stage_context
 from app.tools.registry import ToolRegistry
 from app.config import PROJECTS_DIR
+from app.utils.logger import get_logger
+
+_log = get_logger(__name__)
 
 
 EVALUATOR_SYSTEM_PROMPT = """You are an independent, rigorous Machine Learning Evaluation Agent.
@@ -35,7 +40,11 @@ CRITICAL RULE: NO PLOTTING OR CHARTS.
 
 def run_evaluator(state: ProjectState, router: ModelRouter, registry: ToolRegistry) -> dict[str, Any]:
     """Independent evaluation agent assessing model validity, overfitting, and leakage."""
+    stage_start = time.monotonic()
     project_id = state["project_id"]
+    run_id = state.get("run_id", "unknown")
+    _log.info("[EVALUATOR] Stage started | project=%s run=%s", project_id, run_id)
+
     tools = registry.get_tools_for_role("evaluator")
     ctx = get_stage_context(state, "evaluator")
     iteration = state.get("iteration", 1)
@@ -55,14 +64,18 @@ Model Stage Summary:
 Provide your independent evaluation verdict (PASS or IMPROVE), identify any issues found, provide reasoning, and specify recommended_next_stage ("feature_engineering" or "model").
 """
 
+    prompt_hash = hashlib.sha256(EVALUATOR_SYSTEM_PROMPT.encode()).hexdigest()[:12]
+    _log.info("[EVALUATOR] Invoking LLM | prompt_version=%s iter=%s", prompt_hash, iteration)
+
     eval_output = None
     try:
         eval_output = structured_llm.invoke([
             SystemMessage(content=EVALUATOR_SYSTEM_PROMPT),
             HumanMessage(content=eval_prompt),
         ])
-    except Exception as e:
-        print(f"[EVALUATOR] Structured output warning: {e}", flush=True)
+        _log.debug("[EVALUATOR] Raw LLM response (truncated): %s", str(eval_output)[:600])
+    except Exception as exc:
+        _log.exception("[EVALUATOR] Structured output failed: %s", exc)
 
     if eval_output is None:
         best_score = float(state.get("model_summary", {}).get("best_score", 0.0) or 0.0)
@@ -122,6 +135,12 @@ Provide your independent evaluation verdict (PASS or IMPROVE), identify any issu
 
     artifacts_list = list(state.get("artifacts", []))
     artifacts_list.append(art_eval)
+
+    elapsed = time.monotonic() - stage_start
+    _log.info(
+        "[EVALUATOR] Stage completed | project=%s run=%s | verdict=%s | metric=%.4f | duration=%.2fs",
+        project_id, run_id, eval_output.verdict, eval_output.primary_metric_value, elapsed,
+    )
 
     return {
         "evaluation_summary": eval_dict,

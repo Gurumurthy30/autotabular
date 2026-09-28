@@ -16,6 +16,8 @@ CRITICAL RULES:
 4. When saving artifacts, use exact paths as instructed.
 5. All code must be self-contained and run from top to bottom.
 6. When outputting JSON, use `json.dumps(obj, default=str)` to prevent NumPy int64/float64 serialization errors.
+7. Use pure ASCII characters only in code, comments, strings, and print statements (use standard hyphen '-' instead of non-breaking hyphen '\u2011', standard quotes, no fancy unicode symbols).
+8. When scaling continuous columns or assigning 2D arrays back into DataFrames, assign column by column (e.g. `for idx, col in enumerate(cols): df[col] = scaled[:, idx]`) or cast columns beforehand (e.g. `df[cols] = df[cols].astype(float)`) to avoid pandas LossySetitemError/TypeError when float arrays are assigned into integer columns.
 """
 
 

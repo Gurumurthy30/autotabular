@@ -1,6 +1,11 @@
+import json
 from enum import Enum
 from typing import Literal, TypedDict, Any
 from pydantic import BaseModel, Field
+
+from app.utils.logger import get_logger
+
+_log = get_logger(__name__)
 
 
 class TaskType(str, Enum):
@@ -71,12 +76,111 @@ class ProfileSummary(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+def _convert_numpy_types(obj: Any) -> Any:
+    """Recursively converts numpy and pandas types to standard Python primitives."""
+    if obj is None:
+        return None
+    try:
+        import pandas as pd
+        if pd.isna(obj):
+            if not isinstance(obj, (list, dict)):
+                return None
+    except Exception:
+        pass
+
+    try:
+        import numpy as np
+        if isinstance(obj, np.generic):
+            return obj.item()
+        if isinstance(obj, np.ndarray):
+            return [_convert_numpy_types(x) for x in obj.tolist()]
+    except Exception:
+        pass
+
+    try:
+        import pandas as pd
+        if isinstance(obj, (pd.Timestamp, pd.Timedelta)):
+            return str(obj)
+        if isinstance(obj, pd.Series):
+            return {str(k): _convert_numpy_types(v) for k, v in obj.to_dict().items()}
+        if isinstance(obj, pd.DataFrame):
+            return {str(k): _convert_numpy_types(v) for k, v in obj.to_dict().items()}
+    except Exception:
+        pass
+
+    if isinstance(obj, dict):
+        return {str(k): _convert_numpy_types(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_convert_numpy_types(x) for x in obj]
+    return obj
+
+
+def to_evidence_str(data: Any, _field: str = "evidence") -> str:
+    """Converts raw statistics, dicts, numpy/pandas scalars, and lists into a deterministic,
+    human-readable evidence string.
+
+    When a non-string value is coerced, a WARNING is logged with tag EVIDENCE_COERCION so it
+    can be grepped in logs/app.log.
+    """
+    if data is None:
+        return ""
+    if isinstance(data, str):
+        return data
+
+    # --- coercion path: the LLM returned a non-string value ---
+    _repr = str(data)[:200]  # truncated for safe logging, no raw dataset rows
+    _log.warning(
+        "EVIDENCE_COERCION | field=%s | input_type=%s | preview=%s",
+        _field, type(data).__name__, _repr,
+    )
+
+    cleaned = _convert_numpy_types(data)
+
+    if isinstance(cleaned, (int, float, bool)):
+        return str(cleaned)
+
+    if isinstance(cleaned, dict):
+        # Nested dictionaries (e.g. correlation matrices) are serialized deterministically via json.dumps
+        if any(isinstance(v, dict) for v in cleaned.values()):
+            return json.dumps(cleaned, default=str, sort_keys=True)
+
+        # Flat dictionaries are formatted as clean, deterministic key=value pairs
+        parts = []
+        for k in sorted(cleaned.keys()):
+            v = cleaned[k]
+            if isinstance(v, float):
+                val_str = str(round(v, 4)) if abs(v) >= 1e-4 else str(v)
+            elif isinstance(v, list):
+                formatted_items = [
+                    str(round(x, 4)) if isinstance(x, float) and abs(x) >= 1e-4 else str(x)
+                    for x in v
+                ]
+                val_str = "[" + ", ".join(formatted_items) + "]"
+            else:
+                val_str = str(v)
+            parts.append(f"{k}={val_str}")
+        return ", ".join(parts)
+
+    if isinstance(cleaned, (list, tuple)):
+        return json.dumps(cleaned, default=str, sort_keys=True)
+
+    try:
+        return json.dumps(cleaned, default=str, sort_keys=True)
+    except Exception:
+        return str(cleaned)
+
+
 class EDAFindingItem(BaseModel):
     category: str = Field(description="e.g. correlation, skewness, outliers, leakage, class_imbalance")
     finding: str = Field(description="Clear statement of what was discovered")
-    evidence: str = Field(description="Numerical statistics or evidence supporting the finding")
+    evidence: str = Field(description="Numerical statistics or evidence supporting the finding (formatted as string)")
     implication: str = Field(description="Impact on modeling or feature engineering")
     recommendation: str = Field(description="Actionable suggestion for feature engineering")
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def coerce_evidence_to_str(cls, v: Any) -> str:
+        return to_evidence_str(v, _field="EDAFindingItem.evidence")
 
 
 class EDAOutput(BaseModel):
@@ -84,6 +188,13 @@ class EDAOutput(BaseModel):
     findings: list[EDAFindingItem]
     leakage_risks: list[str] = Field(default_factory=list)
     suggested_feature_ideas: list[str] = Field(default_factory=list)
+
+    @field_validator("findings", mode="before")
+    @classmethod
+    def coerce_findings_list(cls, v: Any) -> Any:
+        if isinstance(v, dict):
+            return [v]
+        return v
 
     @field_validator("leakage_risks", "suggested_feature_ideas", mode="before")
     @classmethod
@@ -108,6 +219,11 @@ class FeatureMetadataItem(BaseModel):
     eda_evidence: str
     leakage_check: str
     inference_available: bool = True
+
+    @field_validator("eda_evidence", mode="before")
+    @classmethod
+    def coerce_eda_evidence_to_str(cls, v: Any) -> str:
+        return to_evidence_str(v, _field="FeatureMetadataItem.eda_evidence")
 
 
 class FeatureEngineeringOutput(BaseModel):

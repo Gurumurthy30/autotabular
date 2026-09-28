@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Any
 from sqlmodel import SQLModel, Field
+from pydantic import field_validator
+from app.core.state import to_evidence_str
 
 
 def utc_now() -> datetime:
@@ -62,6 +64,16 @@ class EDAFinding(SQLModel, table=True):
     implication: str
     recommendation: str
     created_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def coerce_evidence_to_str(cls, v: Any) -> str:
+        return to_evidence_str(v)
+
+    def __init__(self, **data: Any):
+        if "evidence" in data:
+            data["evidence"] = to_evidence_str(data["evidence"])
+        super().__init__(**data)
 
 
 class FeatureVersion(SQLModel, table=True):

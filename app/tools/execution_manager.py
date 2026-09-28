@@ -25,6 +25,31 @@ class ExecutionResult:
         }
 
 
+def normalize_script_unicode(code: str) -> str:
+    """Replaces non-standard unicode dashes, spaces, and quotes with standard ASCII equivalents."""
+    replacements = {
+        "\u2010": "-",  # hyphen
+        "\u2011": "-",  # non-breaking hyphen
+        "\u2012": "-",  # figure dash
+        "\u2013": "-",  # en dash
+        "\u2014": "-",  # em dash
+        "\u2015": "-",  # horizontal bar
+        "\u2018": "'",  # left single quote
+        "\u2019": "'",  # right single quote
+        "\u201a": "'",  # single low-9 quote
+        "\u201b": "'",  # single high-reversed-9 quote
+        "\u201c": '"',  # left double quote
+        "\u201d": '"',  # right double quote
+        "\u201e": '"',  # double low-9 quote
+        "\u00a0": " ",  # non-breaking space
+        "\u202f": " ",  # narrow no-break space
+        "\ufeff": "",   # zero width no-break space (BOM)
+    }
+    for char, rep in replacements.items():
+        code = code.replace(char, rep)
+    return code
+
+
 class ExecutionManager:
     """Manages Python script execution in isolated per-run workspace directories without timeouts."""
 
@@ -58,7 +83,8 @@ class ExecutionManager:
 
         ws = self._prepare_workspace()
         script_file = ws / script_name
-        script_file.write_text(script_content, encoding="utf-8")
+        sanitized_script = normalize_script_unicode(script_content)
+        script_file.write_text(sanitized_script, encoding="utf-8")
 
         env = os.environ.copy()
         if env_vars:
@@ -66,13 +92,16 @@ class ExecutionManager:
         # Ensure project root is in PYTHONPATH so imports work if needed
         project_root = str(Path(__file__).resolve().parent.parent.parent)
         env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
+        # Force UTF-8 encoding for standard streams and child Python process
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
 
         python_executable = sys.executable
 
         start_time = time.time()
-        # Execute subprocess without timeout
+        # Execute subprocess in UTF-8 mode without timeout
         process = subprocess.Popen(
-            [python_executable, str(script_file.resolve())],
+            [python_executable, "-X", "utf8", str(script_file.resolve())],
             cwd=str(ws.resolve()),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

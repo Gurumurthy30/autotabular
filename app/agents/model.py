@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 from typing import Any
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -10,6 +11,9 @@ from app.agents.coder import CoderSubAgent
 from app.tools.registry import ToolRegistry
 from app.tools.mlflow_tools import is_higher_better
 from app.config import PROJECTS_DIR
+from app.utils.logger import get_logger
+
+_log = get_logger(__name__)
 
 
 MODEL_SYSTEM_PROMPT = """You are an expert Tabular Scikit-Learn Modeling Agent.
@@ -28,7 +32,12 @@ LOCKED DECISIONS:
 
 def run_modeling(state: ProjectState, router: ModelRouter, registry: ToolRegistry) -> dict[str, Any]:
     """Selects, trains, and evaluates scikit-learn models, logging results to MLflow."""
+    stage_start = time.monotonic()
     project_id = state["project_id"]
+    run_id = state.get("run_id", "unknown")
+    iteration = state.get("iteration", 1)
+    _log.info("[MODEL] Stage started | project=%s run=%s iter=%s", project_id, run_id, iteration)
+
     tools = registry.get_tools_for_role("model")
     coder_tools = registry.get_tools_for_role("coder")
     coder = CoderSubAgent(project_id, router, coder_tools.files, coder_tools.execution)
@@ -37,7 +46,6 @@ def run_modeling(state: ProjectState, router: ModelRouter, registry: ToolRegistr
     target_col = state.get("target_column")
     task_type = state.get("task_type")
     target_metric = (state.get("target_metric") or ("f1" if "classification" in str(task_type) else "rmse")).lower()
-    iteration = state.get("iteration", 1)
 
     features_parquet = (PROJECTS_DIR / project_id / "features" / "feature_data.parquet").resolve()
     parquet_path_str = str(features_parquet).replace("\\", "/")
@@ -134,8 +142,8 @@ Target Metric: {target_metric}
                 SystemMessage(content=MODEL_SYSTEM_PROMPT),
                 HumanMessage(content=fallback_prompt),
             ])
-        except Exception as e:
-            print(f"[MODEL] Extraction fallback warning: {e}", flush=True)
+        except Exception as exc:
+            _log.exception("[MODEL] Extraction fallback failed: %s", exc)
 
         if stage_output is None:
             stage_output = ModelStageOutput(
@@ -227,6 +235,12 @@ Target Metric: {target_metric}
         if (higher_better and prev_best_score > overall_best_score) or (not higher_better and prev_best_score < overall_best_score):
             overall_best_score = prev_best_score
             overall_best_run = state.get("best_experiment_id")
+
+    elapsed = time.monotonic() - stage_start
+    _log.info(
+        "[MODEL] Stage completed | project=%s run=%s | best_model=%s | %s=%.4f | duration=%.2fs",
+        project_id, run_id, stage_output.best_model_name, target_metric, overall_best_score, elapsed,
+    )
 
     return {
         "model_summary": output_dict,

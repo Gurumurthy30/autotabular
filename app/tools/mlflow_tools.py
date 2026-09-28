@@ -1,6 +1,11 @@
 import mlflow
+import mlflow.tracking
+from mlflow.exceptions import MlflowException
 from typing import Any
 from app.config import MLFLOW_TRACKING_URI
+from app.utils.logger import get_logger
+
+_log = get_logger(__name__)
 
 # Explicit metric direction map (PROJECT_SPEC.md §11)
 METRIC_DIRECTIONS = {
@@ -31,12 +36,54 @@ class MLflowTools:
         self.project_id = project_id
         self.tracking_uri = tracking_uri
         mlflow.set_tracking_uri(self.tracking_uri)
-        # Ensure experiment exists
-        self.experiment = mlflow.get_experiment_by_name(self.project_id)
-        if self.experiment is None:
-            self.experiment_id = mlflow.create_experiment(self.project_id)
-        else:
-            self.experiment_id = self.experiment.experiment_id
+        self.experiment_id = self._ensure_active_experiment()
+
+    def _ensure_active_experiment(self) -> str:
+        """
+        Get or create the MLflow experiment for this project, restoring it if it
+        was soft-deleted.  Returns the active experiment_id as a string.
+
+        MLflow soft-deletes experiments (lifecycle_stage='deleted') when you call
+        mlflow.delete_experiment().  get_experiment_by_name() still returns them,
+        but start_run() raises MlflowException if the experiment is not 'active'.
+        We restore them instead of creating a duplicate name.
+        """
+        client = mlflow.tracking.MlflowClient(tracking_uri=self.tracking_uri)
+        experiment = mlflow.get_experiment_by_name(self.project_id)
+
+        if experiment is None:
+            # Brand-new project — create the experiment
+            exp_id = mlflow.create_experiment(self.project_id)
+            _log.info("[MLFLOW] Created new experiment | project=%s exp_id=%s", self.project_id, exp_id)
+            return exp_id
+
+        if experiment.lifecycle_stage == "deleted":
+            # Experiment was soft-deleted (e.g. project was previously deleted then re-run).
+            # Restore it so we can log new runs without losing the experiment ID linkage.
+            try:
+                client.restore_experiment(experiment.experiment_id)
+                _log.info(
+                    "[MLFLOW] Restored deleted experiment | project=%s exp_id=%s",
+                    self.project_id, experiment.experiment_id,
+                )
+            except MlflowException as exc:
+                # If restore fails for any reason, create a fresh experiment with a suffixed name
+                _log.warning(
+                    "[MLFLOW] Could not restore experiment %s (%s) — creating fresh one",
+                    experiment.experiment_id, exc,
+                )
+                suffix = 1
+                while True:
+                    new_name = f"{self.project_id}_v{suffix}"
+                    if mlflow.get_experiment_by_name(new_name) is None:
+                        break
+                    suffix += 1
+                exp_id = mlflow.create_experiment(new_name)
+                _log.info("[MLFLOW] Created fresh experiment | name=%s exp_id=%s", new_name, exp_id)
+                return exp_id
+
+        return experiment.experiment_id
+
 
     def log_run(
         self,
@@ -47,7 +94,21 @@ class MLflowTools:
         artifact_paths: list[str] | None = None,
     ) -> str:
         """Starts an MLflow run under the project experiment, logs all data, and returns the run_id."""
-        with mlflow.start_run(experiment_id=self.experiment_id, run_name=run_name) as run:
+        # Self-healing: if the experiment was deleted between init and now, restore it and retry once.
+        try:
+            ctx = mlflow.start_run(experiment_id=self.experiment_id, run_name=run_name)
+        except MlflowException as exc:
+            if "active" in str(exc).lower() or "deleted" in str(exc).lower():
+                _log.warning(
+                    "[MLFLOW] Experiment %s is not active (%s) — attempting restore before retry",
+                    self.experiment_id, exc,
+                )
+                self.experiment_id = self._ensure_active_experiment()
+                ctx = mlflow.start_run(experiment_id=self.experiment_id, run_name=run_name)
+            else:
+                raise
+        with ctx as run:
+
             run_id = run.info.run_id
 
             # Log params (ensure stringified or primitive)

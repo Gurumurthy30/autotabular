@@ -18,8 +18,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import validate_config
 from app.db.session import init_db
 from app.api.routes import router
+from app.utils.logger import get_logger
 
-logger = logging.getLogger("uvicorn.error")
+_log = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -28,6 +29,9 @@ async def lifespan(app: FastAPI):
     validate_config()
     # Initialize DB tables on startup
     init_db()
+    _log.info(
+        "[STARTUP] Autonomous Tabular ML Platform started | DB=configured | MLFLOW=configured"
+    )
     yield
 
 
@@ -92,7 +96,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(SQLAlchemyError)
 async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
     """Handles database exceptions safely and logs the traceback."""
-    logger.error(f"Database error on {request.method} {request.url.path}: {exc}", exc_info=True)
+    _log.error(f"Database error on {request.method} {request.url.path}: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
         content={
@@ -107,7 +111,7 @@ async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
     """Catch-all unhandled exception handler to return structured JSON and log tracebacks."""
-    logger.error(f"Unhandled error on {request.method} {request.url.path}: {exc}", exc_info=True)
+    _log.error(f"Unhandled error on {request.method} {request.url.path}: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
         content={
