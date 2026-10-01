@@ -41,12 +41,17 @@ _log = get_logger(__name__)
 
 def _build_default_candidates(
     task_type: str,
-    available_libs: dict[str, bool],
+    available_libs: list[str] | set[str] | dict[str, Any],
     seed: int = 42,
 ) -> list[tuple[str, BaseEstimator]]:
     """Builds a diverse set of competitive model estimators based on available libraries."""
     is_classification = "classification" in task_type
     candidates: list[tuple[str, BaseEstimator]] = []
+
+    if isinstance(available_libs, dict):
+        libs_set = {k for k, v in available_libs.items() if v}
+    else:
+        libs_set = set(available_libs) if available_libs else set()
 
     if is_classification:
         candidates.append(("HistGradientBoosting_tuned", HistGradientBoostingClassifier(
@@ -60,7 +65,7 @@ def _build_default_candidates(
         )))
 
         # LightGBM if installed
-        if available_libs.get("lightgbm"):
+        if "lightgbm" in libs_set:
             try:
                 import lightgbm as lgb
                 candidates.append(("LightGBM", lgb.LGBMClassifier(
@@ -70,7 +75,7 @@ def _build_default_candidates(
                 pass
 
         # XGBoost if installed
-        if available_libs.get("xgboost"):
+        if "xgboost" in libs_set:
             try:
                 import xgboost as xgb
                 candidates.append(("XGBoost", xgb.XGBClassifier(
@@ -80,7 +85,7 @@ def _build_default_candidates(
                 pass
 
         # CatBoost if installed
-        if available_libs.get("catboost"):
+        if "catboost" in libs_set:
             try:
                 import catboost as cb
                 candidates.append(("CatBoost", cb.CatBoostClassifier(
@@ -101,7 +106,7 @@ def _build_default_candidates(
             n_estimators=100, max_depth=12, min_samples_split=5, random_state=seed, n_jobs=-1
         )))
 
-        if available_libs.get("lightgbm"):
+        if "lightgbm" in libs_set:
             try:
                 import lightgbm as lgb
                 candidates.append(("LightGBM", lgb.LGBMRegressor(
@@ -110,11 +115,20 @@ def _build_default_candidates(
             except Exception:
                 pass
 
-        if available_libs.get("xgboost"):
+        if "xgboost" in libs_set:
             try:
                 import xgboost as xgb
                 candidates.append(("XGBoost", xgb.XGBRegressor(
                     n_estimators=150, max_depth=5, learning_rate=0.05, random_state=seed, verbosity=0
+                )))
+            except Exception:
+                pass
+
+        if "catboost" in libs_set:
+            try:
+                import catboost as cb
+                candidates.append(("CatBoost", cb.CatBoostRegressor(
+                    iterations=150, learning_rate=0.05, depth=5, random_seed=seed, verbose=0
                 )))
             except Exception:
                 pass

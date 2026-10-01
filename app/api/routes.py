@@ -1,12 +1,17 @@
 import asyncio
+import gc
 import importlib.util
 import json
+import os
 import pickle
 import re
 import shutil
+import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,9 +36,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from app.api.runner import execute_workflow_async
-from app.config import MLFLOW_TRACKING_URI, PROJECTS_DIR
+from app.api.runner import (
+    cancel_project_runs,
+    cancel_run,
+    execute_workflow_async,
+)
+from app.config import BASE_DIR, MLFLOW_TRACKING_URI, PROJECTS_DIR
 from app.core.events import event_manager
+from app.utils.logger import get_logger
+
+_log = get_logger(__name__)
 from app.db.models import (
     ArtifactIndex,
     Dataset,
@@ -149,16 +161,52 @@ def get_project(project_id: str, session: Session = Depends(get_session)):
     return project
 
 
+def force_remove_directory(path: Path) -> None:
+    """Robust recursive directory removal on Windows with retries, permission resets, and shell fallback."""
+    if not path or not path.exists():
+        return
+
+    gc.collect()
+
+    def on_rm_error(func, p, exc_info):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+
+    for _ in range(5):
+        try:
+            shutil.rmtree(path, onerror=on_rm_error)
+            if not path.exists():
+                return
+        except Exception:
+            time.sleep(0.15)
+            gc.collect()
+
+    if path.exists():
+        cmd = f'cmd.exe /c "rd /s /q \"{path}\""'
+        subprocess.run(cmd, shell=True, check=False)
+
+
 @router.delete("/projects/{project_id}")
 def delete_project(project_id: str, session: Session = Depends(get_session)):
-    """Deletes a project, its associated SQLite database records, filesystem files, and MLflow experiments."""
+    """Deletes a project, its associated SQLite database records, filesystem files, MLflow experiments, models, and code executions."""
     validate_project_id(project_id)
     project = session.get(Project, project_id)
-    dir_exists = (PROJECTS_DIR / project_id).exists()
+    p_dir = PROJECTS_DIR / project_id
+    dir_exists = p_dir.exists()
     if not project and not dir_exists:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
 
-    # 1. Cascade delete database records
+    # 0. Cancel active runs and clean in-memory event subscriptions
+    cancel_project_runs(project_id)
+    runs_to_cancel = session.exec(select(WorkflowRun).where(WorkflowRun.project_id == project_id)).all()
+    for r in runs_to_cancel:
+        cancel_run(r.id)
+    event_manager.clean_subscribers_for_project(project_id)
+
+    # 1. Cascade delete all database records in app_metadata.db
     for model in [Event, ArtifactIndex, EDAFinding, FeatureVersion, Dataset, WorkflowRun, SupervisorMemoryRecord]:
         items = session.exec(select(model).where(model.project_id == project_id)).all()
         for it in items:
@@ -168,22 +216,64 @@ def delete_project(project_id: str, session: Session = Depends(get_session)):
         session.delete(project)
     session.commit()
 
-    # 2. Delete physical project folder under projects/
-    p_dir = PROJECTS_DIR / project_id
+    # 2. Delete physical project directory under projects/ (includes code_executions, models, datasets, etc.)
     if p_dir.exists():
-        shutil.rmtree(p_dir, ignore_errors=True)
+        force_remove_directory(p_dir)
 
-    # 3. Clean up MLflow experiment if present
+    # 3. Completely purge MLflow experiment, runs, metrics, params, and physical artifact folders
+    exp_ids: list[str] = []
     try:
         exp = mlflow.get_experiment_by_name(project_id)
         if exp:
-            mlflow.delete_experiment(exp.experiment_id)
+            exp_ids.append(str(exp.experiment_id))
+            try:
+                mlflow.delete_experiment(exp.experiment_id)
+            except Exception:
+                pass
     except Exception:
         pass
 
+    db_path = BASE_DIR / "mlflow.db"
+    if db_path.exists():
+        try:
+            with sqlite3.connect(db_path, timeout=10.0) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT experiment_id FROM experiments WHERE name = ?", (project_id,))
+                for row in cursor.fetchall():
+                    eid_str = str(row[0])
+                    if eid_str not in exp_ids:
+                        exp_ids.append(eid_str)
+
+                for eid in exp_ids:
+                    cursor.execute("SELECT run_uuid FROM runs WHERE experiment_id = ?", (eid,))
+                    run_uuids = [r[0] for r in cursor.fetchall()]
+                    for rid in run_uuids:
+                        cursor.execute("DELETE FROM latest_metrics WHERE run_uuid = ?", (rid,))
+                        cursor.execute("DELETE FROM metrics WHERE run_uuid = ?", (rid,))
+                        cursor.execute("DELETE FROM params WHERE run_uuid = ?", (rid,))
+                        cursor.execute("DELETE FROM tags WHERE run_uuid = ?", (rid,))
+                        try:
+                            cursor.execute("DELETE FROM inputs WHERE run_uuid = ?", (rid,))
+                        except Exception:
+                            pass
+                    cursor.execute("DELETE FROM runs WHERE experiment_id = ?", (eid,))
+                    cursor.execute("DELETE FROM experiment_tags WHERE experiment_id = ?", (eid,))
+                    cursor.execute("DELETE FROM experiments WHERE experiment_id = ?", (eid,))
+                conn.commit()
+        except Exception as exc:
+            _log.warning("[DELETE] Direct mlflow.db cleanup error: %s", exc)
+
+    # Delete physical mlruns directories
+    mlruns_dir = BASE_DIR / "mlruns"
+    if mlruns_dir.exists() and exp_ids:
+        for eid in exp_ids:
+            target = mlruns_dir / str(eid)
+            if target.exists():
+                force_remove_directory(target)
+
     return {
         "status": "success",
-        "message": f"Project '{project_id}' deleted successfully.",
+        "message": f"Project '{project_id}', all runs, models, code executions, and MLflow records purged successfully.",
         "project_id": project_id,
     }
 

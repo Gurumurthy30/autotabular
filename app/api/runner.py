@@ -22,6 +22,25 @@ from app.utils.logger import get_logger
 
 _log = get_logger(__name__)
 
+_CANCELLED_RUNS: set[str] = set()
+_CANCELLED_PROJECTS: set[str] = set()
+
+
+def cancel_run(run_id: str) -> None:
+    _CANCELLED_RUNS.add(run_id)
+
+
+def cancel_project_runs(project_id: str) -> None:
+    _CANCELLED_PROJECTS.add(project_id)
+
+
+def is_run_cancelled(run_id: str) -> bool:
+    return run_id in _CANCELLED_RUNS
+
+
+def is_project_cancelled(project_id: str) -> bool:
+    return project_id in _CANCELLED_PROJECTS
+
 
 def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, target_column: str | None, target_metric: str | None, constraints: dict | None = None) -> None:
     """Executes the workflow graph synchronously and emits structured events throughout."""
@@ -133,6 +152,9 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
         last_stage = "start"
 
         for output_chunk in graph.stream(initial_state, config={"recursion_limit": 500}):
+            if is_run_cancelled(run_id) or is_project_cancelled(project_id):
+                _log.info("[RUNNER] Run %s cancelled or project deleted; terminating stream.", run_id)
+                return
             for node_name, node_state in output_chunk.items():
                 final_state.update(node_state)
                 curr_stage = node_state.get("current_stage", node_name)

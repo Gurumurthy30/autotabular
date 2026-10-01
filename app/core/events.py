@@ -117,6 +117,13 @@ class EventManager:
             if not self._subscribers[key]:
                 del self._subscribers[key]
 
+    def clean_subscribers_for_project(self, project_id: str) -> None:
+        """Removes and closes all SSE subscriber queues for a given project."""
+        keys_to_remove = [k for k in self._subscribers if k[0] == project_id]
+        for k in keys_to_remove:
+            self._subscribers.pop(k, None)
+
 
 # Global singleton instance
 event_manager = EventManager()
+
