@@ -165,13 +165,36 @@ def run_modeling(
     # 1. Load dataset
     dataset_version = state.get("dataset_version", "dataset_v1")
     dataset_path_str = state.get("split_train_path")
-    if not dataset_path_str:
-        try:
-            dataset_path_str = str(tools.dataset.get_dataset_path(dataset_version).resolve()).replace("\\", "/")
-        except Exception:
-            dataset_path_str = str((PROJECTS_DIR / project_id / "datasets" / f"{dataset_version}.csv").resolve()).replace("\\", "/")
+    if not dataset_path_str or not Path(dataset_path_str).exists():
+        if tools.dataset is not None:
+            try:
+                p = tools.dataset.get_dataset_path(dataset_version)
+                if p.exists():
+                    dataset_path_str = str(p.resolve()).replace("\\", "/")
+            except Exception:
+                pass
 
-    dataset_path = Path(dataset_path_str)
+        if not dataset_path_str or not Path(dataset_path_str).exists():
+            candidates = [
+                PROJECTS_DIR / project_id / "datasets" / dataset_version / "data.csv",
+                PROJECTS_DIR / project_id / "datasets" / dataset_version / "data.parquet",
+                PROJECTS_DIR / project_id / "datasets" / f"{dataset_version}.csv",
+                PROJECTS_DIR / project_id / "datasets" / f"{dataset_version}.parquet",
+                PROJECTS_DIR / project_id / "datasets" / "dataset_v1" / "data.csv",
+            ]
+            for cand in candidates:
+                if cand.exists():
+                    dataset_path_str = str(cand.resolve()).replace("\\", "/")
+                    break
+
+            if not dataset_path_str or not Path(dataset_path_str).exists():
+                d_dir = PROJECTS_DIR / project_id / "datasets"
+                if d_dir.exists():
+                    all_data_files = list(d_dir.glob("**/*.csv")) + list(d_dir.glob("**/*.parquet"))
+                    if all_data_files:
+                        dataset_path_str = str(all_data_files[0].resolve()).replace("\\", "/")
+
+    dataset_path = Path(dataset_path_str or "")
     if not dataset_path.exists():
         err_msg = f"Dataset path not found: {dataset_path}"
         _log.error("[MODEL] %s", err_msg)

@@ -91,21 +91,34 @@ def guard_action(
         if not report_done:
             return "report", "Prerequisite missing: cannot finish before generating final report."
 
-    # 2. Duplicate-brief guard: same action + same brief hash as the previous step -> blocked.
+    # 2. Duplicate-brief guard & consecutive failure guard:
     ledger = mem.read_ledger()
-    if ledger:
-        last_row = ledger[-1]
+    work_rows = [r for r in ledger if r.action not in ("note", "system")]
+    if work_rows:
+        last_row = work_rows[-1]
         if last_row.action == action:
             curr_hash = compute_brief_hash(decision.brief)
             prev_brief = getattr(last_row, "brief_summary", "")
             prev_hash = getattr(last_row, "brief_hash", None)
             if (prev_hash and prev_hash == curr_hash) or (curr_hash in prev_brief) or (decision.brief.objective and decision.brief.objective in prev_brief):
                 fallback = get_deterministic_fallback(state, mem)
+                if fallback == action:
+                    steps = ["profile", "eda", "fe", "model", "judge", "report", "finish"]
+                    idx = steps.index(action) if action in steps else 0
+                    fallback = steps[(idx + 1) % len(steps)]
                 return fallback, f"Action '{action}' repeated with identical brief hash. Supervisor cannot repeat identical brief."
 
+            # Consecutive failure protection: if the same action failed 2+ times consecutively, divert to next action
+            recent_fails = [r for r in work_rows[-2:] if r.action == action and r.status == "failed"]
+            if len(recent_fails) >= 2:
+                steps = ["profile", "eda", "fe", "judge", "report", "finish"]
+                idx = steps.index(action) if action in steps else 0
+                fallback = steps[(idx + 1) % len(steps)]
+                return fallback, f"Action '{action}' failed consecutively ({last_row.result_summary[:60]}). Diverting to '{fallback}'."
+
     # 3. Judge-consecutive guard: judge cannot run twice in a row without a work step between.
-    if action == "judge" and ledger:
-        if ledger[-1].action in ("judge", "evaluator"):
+    if action == "judge" and work_rows:
+        if work_rows[-1].action in ("judge", "evaluator"):
             fallback = get_deterministic_fallback(state, mem)
             return fallback, "Judge cannot run twice consecutively without an intervening work step."
 

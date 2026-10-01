@@ -50,6 +50,7 @@ class ToolRegistry:
         elif role in ("model", "judge", "evaluator"):
             return AgentTools(
                 file_tools=self._file_tools,
+                dataset_tools=self._dataset_tools,
                 mlflow_tools=self._mlflow_tools,
                 artifact_index=self._artifact_index,
             )

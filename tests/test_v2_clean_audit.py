@@ -185,3 +185,15 @@ def test_paired_noise_floor_and_significance():
     is_sig_rmse, diff_rmse, nf_rmse = is_significant_gain(cand_rmse, best_rmse, direction="lower")
     assert is_sig_rmse
     assert diff_rmse < -1.0 * nf_rmse
+
+
+def test_model_registry_has_dataset_tools():
+    """Verify registry provides dataset_tools to model agent and resolves nested dataset paths."""
+    registry = ToolRegistry("rainfall_predection")
+    model_tools = registry.get_tools_for_role("model")
+    assert model_tools.dataset is not None
+
+    path = model_tools.dataset.get_dataset_path("dataset_v1")
+    assert path.exists()
+    assert path.name == "data.csv"
+

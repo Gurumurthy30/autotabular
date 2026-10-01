@@ -132,7 +132,7 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
         final_state = initial_state
         last_stage = "start"
 
-        for output_chunk in graph.stream(initial_state, config={"recursion_limit": 100}):
+        for output_chunk in graph.stream(initial_state, config={"recursion_limit": 500}):
             for node_name, node_state in output_chunk.items():
                 final_state.update(node_state)
                 curr_stage = node_state.get("current_stage", node_name)

@@ -251,3 +251,33 @@ def test_get_deterministic_fallback_ordering(tmp_path, monkeypatch):
     # After report: finish
     state["worker_runs"]["report"] = 1
     assert get_deterministic_fallback(state, mem) == "finish"
+
+
+def test_guard_consecutive_failures_diverts(tmp_path, monkeypatch):
+    """If an action failed 2+ times consecutively, guard diverts to deterministic fallback."""
+    monkeypatch.setattr("app.core.run_memory.PROJECTS_DIR", tmp_path)
+    mem = RunMemory("p_test", "r_test")
+
+    # 2 consecutive failures on model
+    mem.append_ledger(LedgerRow(
+        step=1, ts="t", agent="model", action="model", brief_summary="m1", status="failed",
+        result_summary="Dataset path not found", version_id="v1", score=None, delta_vs_best=None,
+        judge_overall=None, issues=[], concern=None, decision_reason="r", duration_s=1.0,
+    ))
+    mem.append_ledger(LedgerRow(
+        step=2, ts="t", agent="model", action="model", brief_summary="m2", status="failed",
+        result_summary="Dataset path not found", version_id="v1", score=None, delta_vs_best=None,
+        judge_overall=None, issues=[], concern=None, decision_reason="r", duration_s=1.0,
+    ))
+
+    state = {
+        "step": 3,
+        "current_version": "v1",
+        "worker_runs": {"profile": 1, "eda": 1, "fe": 1, "model": 2},
+    }
+
+    action, note = guard_action(state, mem, make_decision("model", objective="different objective"))
+    assert action != "model"
+    assert note is not None
+    assert "failed consecutively" in note
+
