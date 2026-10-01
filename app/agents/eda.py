@@ -17,6 +17,9 @@ from app.core.run_memory import RunMemory
 from app.core.schemas import WorkerConcern, WorkerReport
 from app.core.state import EDAOutput, ProjectState, to_evidence_str
 from app.tools.registry import ToolRegistry
+from app.utils.logger import get_logger
+
+_log = get_logger(__name__)
 
 
 def run_eda(
