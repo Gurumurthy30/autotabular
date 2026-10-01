@@ -1,9 +1,11 @@
+import asyncio
 import json
 import uuid
-import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
+
 from sqlmodel import Session, select
+
 from app.db.models import Event
 from app.db.session import engine
 
@@ -27,7 +29,7 @@ class EventManager:
     ) -> dict[str, Any]:
         """Persists the event to SQLite and broadcasts to all active SSE queues."""
         event_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         data_payload = data or {}
 
         event_record = Event(

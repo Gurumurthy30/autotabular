@@ -1,18 +1,23 @@
-import json
 import asyncio
-from datetime import datetime, timezone
-from typing import Any
-from pathlib import Path
+from datetime import UTC, datetime
 
 from sqlmodel import Session, select
-from app.db.session import engine
-from app.db.models import WorkflowRun, EDAFinding, FeatureVersion, SupervisorMemoryRecord, ArtifactIndex
-from app.core.events import event_manager
-from app.core.state import ProjectState, TaskType, to_evidence_str
-from app.core.model_router import ModelRouter
-from app.tools.dataset_tools import DatasetTools
-from app.graph.build_graph import build_ml_graph
+
 from app.config import PROJECTS_DIR
+from app.core.events import event_manager
+from app.core.model_router import ModelRouter
+from app.core.run_memory import RunMemory
+from app.core.state import ProjectState, TaskType, to_evidence_str
+from app.core.versions import is_higher_better
+from app.db.models import (
+    ArtifactIndex,
+    EDAFinding,
+    FeatureVersion,
+    WorkflowRun,
+)
+from app.db.session import engine
+from app.graph.build_graph import build_ml_graph
+from app.tools.dataset_tools import DatasetTools
 from app.utils.logger import get_logger
 
 _log = get_logger(__name__)
@@ -20,13 +25,10 @@ _log = get_logger(__name__)
 
 def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, target_column: str | None, target_metric: str | None, constraints: dict | None = None) -> None:
     """Executes the workflow graph synchronously and emits structured events throughout."""
-    start_time = datetime.now(timezone.utc)
-    constraints = constraints or {}
-    max_iterations = constraints.get("max_iterations", 3)
-
+    start_time = datetime.now(UTC)
     _log.info(
-        "[RUNNER] Workflow started | project=%s run=%s dataset=%s target=%s metric=%s max_iter=%s",
-        project_id, run_id, dataset_version, target_column, target_metric, max_iterations,
+        "[RUNNER] Workflow started | project=%s run=%s dataset=%s target=%s metric=%s",
+        project_id, run_id, dataset_version, target_column, target_metric,
     )
 
     # 1. Update run to RUNNING
@@ -82,28 +84,41 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
             )
             return
 
+        # Initialize RunMemory and mission.json
+        mem = RunMemory(project_id, run_id)
+        metric_name = target_metric or "auto"
+        mem.init_mission(
+            user_goal=f"Train tabular ML model to predict '{target_column}'",
+            target_column=target_column or "",
+            target_metric=metric_name,
+            task_type="",
+            metric_direction="higher" if is_higher_better(metric_name) else "lower",
+        )
+
         initial_state: ProjectState = {
             "project_id": project_id,
             "run_id": run_id,
             "user_goal": f"Train tabular ML model to predict '{target_column}'",
             "target_column": target_column,
             "target_metric": target_metric,
-            "description": f"Target: {target_column}, Metric: {target_metric}",
-            "constraints": constraints,
-            "dataset_id": Path(dataset_path).stem,
             "dataset_version": dataset_version,
             "task_type": None,
             "profile_summary": {},
             "eda_findings": {},
             "feature_summary": {},
             "model_summary": {},
-            "evaluation_summary": {},
             "current_stage": "start",
             "iteration": 1,
-            "max_iterations": max_iterations,
+            "step": 0,
+            "plan": [],
+            "current_version": None,
+            "best_version": None,
+            "open_concern": None,
+            "guard_note": None,
+            "worker_runs": {},
+            "report": None,
             "best_experiment_id": None,
             "best_metric_value": None,
-            "supervisor_memory": {},
             "artifacts": [],
             "next_action": "profile",
             "status": "RUNNING",
@@ -130,7 +145,7 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
                         if run_record:
                             run_record.status = "FAILED"
                             run_record.error = error_msg
-                            run_record.completed_at = datetime.now(timezone.utc)
+                            run_record.completed_at = datetime.now(UTC)
                             session.add(run_record)
                             session.commit()
 
@@ -145,16 +160,60 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
                     return
 
                 if node_name == "supervisor":
-                    next_act = node_state.get("next_action")
+                    dec = node_state.get("supervisor_decision") or {}
+                    step_num = node_state.get("step", 1) - 1
+                    next_act = node_state.get("next_action") or dec.get("action")
+                    reason = dec.get("reason", "")
+                    brief_summary = dec.get("brief", {}).get("objective", "") if isinstance(dec.get("brief"), dict) else ""
+
+                    # Emit supervisor_decision (both lower and upper for client compatibility)
+                    event_manager.emit_event(
+                        project_id=project_id,
+                        run_id=run_id,
+                        event_type="supervisor_decision",
+                        stage="supervisor",
+                        message=f"Supervisor step {step_num}: chosen '{next_act}'. {reason}",
+                        data={
+                            "step": step_num,
+                            "action": next_act,
+                            "reason": reason,
+                            "brief_summary": brief_summary,
+                            "thought": dec.get("thought", ""),
+                            "current_stage": curr_stage,
+                            "next_action": next_act,
+                            "iteration": iteration_idx,
+                        },
+                    )
                     event_manager.emit_event(
                         project_id=project_id,
                         run_id=run_id,
                         event_type="SUPERVISOR_DECISION",
                         stage="supervisor",
                         message=f"Supervisor reviewed '{curr_stage}'. Next route: '{next_act}' (Iteration {iteration_idx}).",
-                        data={"current_stage": curr_stage, "next_action": next_act, "iteration": iteration_idx},
+                        data={
+                            "step": step_num,
+                            "action": next_act,
+                            "reason": reason,
+                            "brief_summary": brief_summary,
+                            "current_stage": curr_stage,
+                            "next_action": next_act,
+                            "iteration": iteration_idx,
+                        },
                     )
+
+                    # Emit guard_override if any occurred
+                    for g_reason in node_state.get("guard_overrides", []):
+                        event_manager.emit_event(
+                            project_id=project_id,
+                            run_id=run_id,
+                            event_type="guard_override",
+                            stage="supervisor",
+                            message=f"Guard blocked action: {g_reason}",
+                            data={"reason": g_reason},
+                        )
+
                 else:
+                    # Worker completed: emit legacy stage event
                     event_manager.emit_event(
                         project_id=project_id,
                         run_id=run_id,
@@ -163,6 +222,45 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
                         message=f"Completed stage: '{node_name.upper()}' (Iteration {iteration_idx}).",
                         data={"stage": node_name, "iteration": iteration_idx},
                     )
+
+                    report_data = node_state.get("report") or {}
+                    score_val = None
+                    if node_name == "model":
+                        score_val = node_state.get("best_metric_value")
+                    elif isinstance(report_data.get("evidence"), dict):
+                        score_val = report_data.get("evidence", {}).get("score")
+
+                    # Emit worker_report
+                    event_manager.emit_event(
+                        project_id=project_id,
+                        run_id=run_id,
+                        event_type="worker_report",
+                        stage=node_name,
+                        message=f"Worker '{node_name}' finished: {report_data.get('result_summary', 'completed')}",
+                        data={
+                            "agent": node_name,
+                            "status": report_data.get("status", "ok"),
+                            "result_summary": report_data.get("result_summary", ""),
+                            "score": score_val,
+                            "evidence": report_data.get("evidence", {}),
+                        },
+                    )
+
+                    # Emit concern if raised by worker
+                    if open_concern := node_state.get("open_concern"):
+                        event_manager.emit_event(
+                            project_id=project_id,
+                            run_id=run_id,
+                            event_type="concern",
+                            stage=node_name,
+                            message=f"Concern raised by {node_name}: {open_concern.get('claim')}",
+                            data={
+                                "agent": node_name,
+                                "claim": open_concern.get("claim", ""),
+                                "evidence": open_concern.get("evidence", ""),
+                                "suggestion": open_concern.get("suggestion", ""),
+                            },
+                        )
 
                     if node_name == "profile":
                         task_guess = node_state.get("task_type")
@@ -202,17 +300,28 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
                             data={"best_experiment_id": node_state.get("best_experiment_id"), "best_metric_value": node_state.get("best_metric_value")},
                         )
 
-                    elif node_name == "evaluator":
-                        verdict = node_state.get("evaluation_summary", {}).get("verdict")
-                        if verdict == "IMPROVE":
+                    elif node_name in ("judge", "evaluator"):
+                        judge_rep = node_state.get("judge_report", {})
+                        verdict = judge_rep.get("overall")
+                        if verdict in ("improve", "blocked"):
                             event_manager.emit_event(
                                 project_id=project_id,
                                 run_id=run_id,
                                 event_type="EVALUATION_FAILED",
-                                stage="evaluator",
-                                message=f"Evaluator verdict: IMPROVE. Requesting refinement.",
-                                data=node_state.get("evaluation_summary", {}),
+                                stage="judge",
+                                message=f"Judge verdict: {verdict.upper()}. Requesting refinement.",
+                                data=judge_rep,
                             )
+
+                # Log per-step metrics
+                step_elapsed = (datetime.now(UTC) - start_time).total_seconds()
+                _log.info(
+                    "[STEP] step=%s action=%s duration=%.2fs best_score=%s",
+                    final_state.get("step"),
+                    node_name,
+                    step_elapsed,
+                    final_state.get("best_metric_value"),
+                )
 
         # 3. Synchronize EDA findings to SQLite
         eda_data = final_state.get("eda_findings", {})
@@ -228,7 +337,7 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
                     evidence=to_evidence_str(item.get("evidence", "")),
                     implication=str(item.get("implication", "")),
                     recommendation=str(item.get("recommendation", "")),
-                    created_at=datetime.now(timezone.utc),
+                    created_at=datetime.now(UTC),
                 )
                 session.merge(finding_rec)
 
@@ -245,23 +354,11 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
                     data_path=fe_data.get("data_file", ""),
                     schema_path=fe_data.get("schema_file", ""),
                     feature_count=len(fe_data.get("created_features", [])),
-                    created_at=datetime.now(timezone.utc),
+                    created_at=datetime.now(UTC),
                 )
                 session.merge(feat_rec)
 
-            # 5. Synchronize SupervisorMemory
-            mem_path = PROJECTS_DIR / project_id / "memory" / "supervisor.json"
-            if mem_path.exists():
-                mem_json = mem_path.read_text(encoding="utf-8")
-                mem_rec = SupervisorMemoryRecord(
-                    id=f"mem_{project_id}",
-                    project_id=project_id,
-                    memory_json=mem_json,
-                    updated_at=datetime.now(timezone.utc),
-                )
-                session.merge(mem_rec)
-
-            # 5.5 Synchronize ArtifactIndex for created files
+            # 5. Synchronize ArtifactIndex for created files (deduplicating by project_id and path)
             artifact_dirs = [
                 ("profile", PROJECTS_DIR / project_id / "profile"),
                 ("eda", PROJECTS_DIR / project_id / "eda"),
@@ -272,17 +369,24 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
                 if stage_dir.exists():
                     for f in stage_dir.rglob("*"):
                         if f.is_file():
-                            art_id = f"art_{project_id}_{stage_name}_{f.name}"
-                            existing = session.get(ArtifactIndex, art_id)
+                            path_str = str(f)
+                            norm_path = str(f.resolve()).replace("\\", "/")
+                            existing = session.exec(
+                                select(ArtifactIndex).where(
+                                    ArtifactIndex.project_id == project_id,
+                                    (ArtifactIndex.path == path_str) | (ArtifactIndex.path == norm_path),
+                                )
+                            ).first()
                             if not existing:
+                                art_id = f"art_{project_id}_{stage_name}_{f.name}"
                                 art_rec = ArtifactIndex(
                                     id=art_id,
                                     project_id=project_id,
                                     run_id=run_id,
                                     artifact_type=stage_name,
-                                    path=str(f),
+                                    path=path_str,
                                     version=dataset_version,
-                                    created_at=datetime.now(timezone.utc).isoformat(),
+                                    created_at=datetime.now(UTC).isoformat(),
                                 )
                                 session.add(art_rec)
 
@@ -294,11 +398,11 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
                 run_record.iteration = final_state.get("iteration", 1)
                 run_record.best_experiment_id = final_state.get("best_experiment_id")
                 run_record.best_metric_value = final_state.get("best_metric_value")
-                run_record.completed_at = datetime.now(timezone.utc)
+                run_record.completed_at = datetime.now(UTC)
                 session.add(run_record)
                 session.commit()
 
-        elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+        elapsed = (datetime.now(UTC) - start_time).total_seconds()
         _log.info(
             "[RUNNER] Workflow completed | project=%s run=%s | status=SUCCESS | elapsed=%.1fs",
             project_id, run_id, elapsed,
@@ -330,7 +434,7 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
                 if run_record:
                     run_record.status = "FAILED"
                     run_record.error = err_msg
-                    run_record.completed_at = datetime.now(timezone.utc)
+                    run_record.completed_at = datetime.now(UTC)
                     session.add(run_record)
                     session.commit()
 

@@ -1,5 +1,4 @@
 import os
-import logging
 import warnings
 from contextlib import asynccontextmanager
 
@@ -9,15 +8,15 @@ warnings.filterwarnings("ignore")
 
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
-from sqlalchemy.exc import SQLAlchemyError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.routes import router
 from app.config import validate_config
 from app.db.session import init_db
-from app.api.routes import router
 from app.utils.logger import get_logger
 
 _log = get_logger(__name__)

@@ -1,42 +1,51 @@
 import asyncio
 import importlib.util
 import json
+import pickle
 import re
 import shutil
-import uuid
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional, Any
-
-import joblib
-import numpy as np
-import pickle
 import subprocess
 import sys
 import tempfile
+import uuid
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
-import pandas as pd
+import joblib
 import mlflow
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks, Query, Form, Response
+import numpy as np
+import pandas as pd
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from app.db.session import get_session
-from app.db.models import (
-    Project,
-    Dataset,
-    WorkflowRun,
-    ArtifactIndex,
-    EDAFinding,
-    FeatureVersion,
-    Event,
-    SupervisorMemoryRecord,
-)
 from app.api.runner import execute_workflow_async
+from app.config import MLFLOW_TRACKING_URI, PROJECTS_DIR
 from app.core.events import event_manager
+from app.db.models import (
+    ArtifactIndex,
+    Dataset,
+    EDAFinding,
+    Event,
+    FeatureVersion,
+    Project,
+    SupervisorMemoryRecord,
+    WorkflowRun,
+)
+from app.db.session import get_session
 from app.tools.mlflow_tools import MLflowTools, is_higher_better
-from app.config import PROJECTS_DIR, MLFLOW_TRACKING_URI
 from app.utils.logger import get_logger
 
 _log = get_logger(__name__)
@@ -48,14 +57,14 @@ router = APIRouter()
 
 class ProjectCreate(BaseModel):
     name: str
-    description: Optional[str] = None
+    description: str | None = None
 
 
 class RunCreate(BaseModel):
-    target_column: Optional[str] = None
-    target_metric: Optional[str] = None
-    dataset_version: Optional[str] = None
-    constraints: Optional[dict[str, Any]] = None
+    target_column: str | None = None
+    target_metric: str | None = None
+    dataset_version: str | None = None
+    constraints: dict[str, Any] | None = None
 
 
 def validate_project_id(project_id: str) -> str:
@@ -96,7 +105,7 @@ def create_project(data: ProjectCreate, session: Session = Depends(get_session))
     if existing:
         project_id = f"{slug}_{uuid.uuid4().hex[:4]}"
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     project = Project(
         id=project_id,
         name=data.name,
@@ -128,7 +137,7 @@ def get_project(project_id: str, session: Session = Depends(get_session)):
     project = session.get(Project, project_id)
     if not project:
         if (PROJECTS_DIR / project_id).exists():
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             return Project(
                 id=project_id,
                 name=project_id,
@@ -217,7 +226,7 @@ def get_code_executions(project_id: str, session: Session = Depends(get_session)
                 "stdout": "Completed model training and evaluation.",
                 "stderr": "",
                 "success": True,
-                "executed_at": datetime.fromtimestamp(ws_script.stat().st_mtime, timezone.utc).isoformat(),
+                "executed_at": datetime.fromtimestamp(ws_script.stat().st_mtime, UTC).isoformat(),
                 "duration_ms": 1500,
             })
         feat_script = PROJECTS_DIR / project_id / "features" / "feature_pipeline.py"
@@ -235,7 +244,7 @@ def get_code_executions(project_id: str, session: Session = Depends(get_session)
                 "stdout": "Transformed dataset and saved feature_data.parquet.",
                 "stderr": "",
                 "success": True,
-                "executed_at": datetime.fromtimestamp(feat_script.stat().st_mtime, timezone.utc).isoformat(),
+                "executed_at": datetime.fromtimestamp(feat_script.stat().st_mtime, UTC).isoformat(),
                 "duration_ms": 1200,
             })
 
@@ -271,7 +280,7 @@ def upload_dataset(project_id: str, file: UploadFile = File(...), session: Sessi
         with open(dest_file, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to save uploaded file: {e!s}")
 
     # Validate that the file is an actual parseable tabular CSV with rows and columns
     try:
@@ -286,7 +295,7 @@ def upload_dataset(project_id: str, file: UploadFile = File(...), session: Sessi
     except Exception as e:
         if dest_file.exists():
             dest_file.unlink()
-        raise HTTPException(status_code=400, detail=f"Failed to parse CSV file: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to parse CSV file: {e!s}")
 
     dataset_record = Dataset(
         id=f"ds_{uuid.uuid4().hex[:8]}",
@@ -296,7 +305,7 @@ def upload_dataset(project_id: str, file: UploadFile = File(...), session: Sessi
         file_path=str(dest_file),
         row_count=row_count,
         col_count=col_count,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     session.add(dataset_record)
     session.commit()
@@ -348,7 +357,7 @@ def trigger_run(
         target_metric=payload.target_metric,
         status="PENDING",
         current_stage="start",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     session.add(workflow_run)
     session.commit()
@@ -423,7 +432,7 @@ async def stream_events(project_id: str, run_id: str = Query(...)):
                         or event.get("data", {}).get("status") in ["NEEDS_INPUT", "FAILED"]
                     ):
                         break
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # Keep-alive heartbeat
                     yield ": ping\n\n"
         finally:
@@ -524,7 +533,7 @@ def get_artifact_content(project_id: str, artifact_id: str, session: Session = D
         else:
             return {"type": "text", "content": file_path.read_text(encoding="utf-8", errors="replace")}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read artifact content: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to read artifact content: {e!s}")
 
 
 @router.get("/projects/{project_id}/datasets/{version}/preview")
@@ -560,7 +569,7 @@ def preview_dataset(project_id: str, version: str, session: Session = Depends(ge
             "total_columns": len(df.columns),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to preview dataset: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to preview dataset: {e!s}")
 
 
 # --- Models & Leaderboard Endpoints ---
@@ -603,7 +612,7 @@ def get_experiments(project_id: str, session: Session = Depends(get_session)):
 def transform_raw_test_features(
     project_id: str,
     test_df: pd.DataFrame,
-    target_col: Optional[str] = None,
+    target_col: str | None = None,
 ) -> pd.DataFrame:
     """
     Transforms raw, unprocessed test data using the project's saved feature engineering pipeline.
@@ -786,7 +795,7 @@ def predict_model(
     project_id: str,
     experiment_id: str,
     test_file: UploadFile = File(...),
-    id_column: Optional[str] = Form(None),
+    id_column: str | None = Form(None),
     session: Session = Depends(get_session),
 ):
     """Generates Kaggle-style model predictions on an unlabeled test CSV using the project's feature pipeline."""
@@ -802,7 +811,7 @@ def predict_model(
     try:
         test_df = pd.read_csv(test_file.file)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse CSV file: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to parse CSV file: {e!s}")
 
     if len(test_df) == 0:
         raise HTTPException(status_code=400, detail="Test file contains 0 data rows.")
@@ -827,25 +836,39 @@ def predict_model(
         ).first()
         if latest_run and latest_run.target_column:
             target_col = latest_run.target_column
-        else:
-            target_col = "target"
 
     # 3. Validate required feature columns from training dataset / profile
     training_feature_cols = []
+    id_candidates = {"id", "passengerid", "row_id", "index", "id_column"}
+    raw_train_cols = []
+
     if profile_data.get("columns"):
-        training_feature_cols = [
-            c["name"] for c in profile_data["columns"]
-            if c["name"] != target_col
-        ]
+        raw_train_cols = [c["name"] for c in profile_data["columns"]]
     elif (PROJECTS_DIR / project_id / "datasets" / "dataset_v1" / "data.csv").exists():
         try:
             train_sample = pd.read_csv(PROJECTS_DIR / project_id / "datasets" / "dataset_v1" / "data.csv", nrows=1)
-            training_feature_cols = [c for c in train_sample.columns if c != target_col]
+            raw_train_cols = list(train_sample.columns)
         except Exception:
             pass
 
+    # Infer target column if missing or not in training columns
+    if raw_train_cols and (not target_col or target_col not in raw_train_cols):
+        for c in raw_train_cols:
+            if c.lower() in project_id.lower() or c.lower() in ("target", "label", "rainfall", "price", "survived"):
+                target_col = c
+                break
+        else:
+            diff_cols = [c for c in raw_train_cols if c not in test_df.columns and c.lower() not in id_candidates]
+            if len(diff_cols) == 1:
+                target_col = diff_cols[0]
+
+    if not target_col:
+        target_col = "target"
+
+    if raw_train_cols:
+        training_feature_cols = [c for c in raw_train_cols if c != target_col]
+
     if training_feature_cols:
-        id_candidates = {"id", "passengerid", "row_id", "index", "id_column"}
         missing_cols = [
             c for c in training_feature_cols
             if c not in test_df.columns and c.lower() not in id_candidates
@@ -963,7 +986,7 @@ def predict_model(
         X_test = transform_raw_test_features(project_id, test_df, target_col=target_col)
     except Exception as exc:
         _log.exception("[PREDICT] Feature transformation failed: %s", exc)
-        raise HTTPException(status_code=400, detail=f"Feature transformation failed: {str(exc)}")
+        raise HTTPException(status_code=400, detail=f"Feature transformation failed: {exc!s}")
 
     # 8. Align feature columns with model expectations
     feature_names = None
@@ -1004,7 +1027,7 @@ def predict_model(
         preds = model.predict(X_test)
     except Exception as e:
         _log.exception("[PREDICT] Model inference failed: %s", e)
-        raise HTTPException(status_code=500, detail=f"Model inference failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Model inference failed: {e!s}")
 
     # 10. Format and return submission CSV
     submission_df = pd.DataFrame({

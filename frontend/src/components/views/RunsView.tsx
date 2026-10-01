@@ -9,7 +9,7 @@ interface RunsViewProps {
   onTriggerNewRun: () => void;
 }
 
-export function RunsView({ projectId, runs, onTriggerNewRun }: RunsViewProps) {
+export function RunsView({ projectId: _projectId, runs, onTriggerNewRun }: RunsViewProps) {
   const { setActiveRunId, setActiveTab } = useUIStore();
 
   const handleSelectRun = (runId: string) => {

@@ -1,19 +1,18 @@
-import sys
 import uuid
-import click
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
-from app.core.state import ProjectState
+import click
+
 from app.core.model_router import ModelRouter
-from app.tools.dataset_tools import DatasetTools
+from app.core.state import ProjectState
 from app.graph.build_graph import build_ml_graph
+from app.tools.dataset_tools import DatasetTools
 
 
 @click.group()
 def cli():
     """Agentic Tabular ML Engineering Platform CLI."""
-    pass
 
 
 @cli.command()
@@ -22,8 +21,7 @@ def cli():
 @click.option("--target", "-t", required=True, help="Target column name")
 @click.option("--metric", "-m", default=None, help="Target metric (e.g. f1, roc_auc, rmse, r2)")
 @click.option("--description", default="", help="Project description or user goal")
-@click.option("--max-iterations", default=3, type=int, help="Maximum Model <-> Evaluator iterations")
-def run(project_name: str, dataset: str, target: str, metric: str | None, description: str, max_iterations: int):
+def run(project_name: str, dataset: str, target: str, metric: str | None, description: str):
     """Executes the autonomous tabular ML workflow end-to-end."""
     print("=" * 70)
     print(f"Starting Tabular ML Pipeline for project: '{project_name}'")
@@ -47,7 +45,7 @@ def run(project_name: str, dataset: str, target: str, metric: str | None, descri
         "target_column": target,
         "target_metric": metric,
         "description": description,
-        "constraints": {"max_iterations": max_iterations},
+        "constraints": {},
         "dataset_id": Path(dataset).stem,
         "dataset_version": version,
         "task_type": None,
@@ -55,10 +53,8 @@ def run(project_name: str, dataset: str, target: str, metric: str | None, descri
         "eda_findings": {},
         "feature_summary": {},
         "model_summary": {},
-        "evaluation_summary": {},
         "current_stage": "start",
         "iteration": 1,
-        "max_iterations": max_iterations,
         "best_experiment_id": None,
         "best_metric_value": None,
         "supervisor_memory": {},

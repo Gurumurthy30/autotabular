@@ -70,5 +70,8 @@ logs/
 *.events.jsonl
 
 # documents
-docs/AUDIT_REPORT.MD
-docs/CLEAR.MD
+docs/audit_raw/
+
+.ruff_cache/
+scratch_diag/
+scratch_user_prompt.txt

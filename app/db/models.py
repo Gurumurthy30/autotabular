@@ -1,12 +1,14 @@
-from datetime import datetime, timezone
-from typing import Optional, Any
-from sqlmodel import SQLModel, Field
+from datetime import UTC, datetime
+from typing import Any
+
 from pydantic import field_validator
+from sqlmodel import Field, SQLModel
+
 from app.core.state import to_evidence_str
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class Project(SQLModel, table=True):
@@ -14,7 +16,7 @@ class Project(SQLModel, table=True):
 
     id: str = Field(primary_key=True)
     name: str = Field(index=True)
-    description: Optional[str] = None
+    description: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -27,8 +29,8 @@ class Dataset(SQLModel, table=True):
     version: str = Field(index=True)  # e.g. "dataset_v1"
     filename: str
     file_path: str
-    row_count: Optional[int] = None
-    col_count: Optional[int] = None
+    row_count: int | None = None
+    col_count: int | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -37,19 +39,19 @@ class WorkflowRun(SQLModel, table=True):
 
     id: str = Field(primary_key=True)
     project_id: str = Field(index=True)
-    dataset_id: Optional[str] = None
+    dataset_id: str | None = None
     dataset_version: str = "dataset_v1"
-    target_column: Optional[str] = None
-    target_metric: Optional[str] = None
+    target_column: str | None = None
+    target_metric: str | None = None
     status: str = Field(default="PENDING", index=True)  # PENDING, RUNNING, SUCCESS, FAILED, NEEDS_INPUT
     current_stage: str = "start"
     iteration: int = 1
-    max_iterations: int = 3
-    best_experiment_id: Optional[str] = None
-    best_metric_value: Optional[float] = None
-    error: Optional[str] = None
+    max_iterations: int = 0  # No longer enforced; kept for DB/API compatibility
+    best_experiment_id: str | None = None
+    best_metric_value: float | None = None
+    error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
-    completed_at: Optional[datetime] = None
+    completed_at: datetime | None = None
 
 
 class EDAFinding(SQLModel, table=True):
@@ -96,11 +98,11 @@ class ArtifactIndex(SQLModel, table=True):
 
     id: str = Field(primary_key=True)
     project_id: str = Field(index=True)
-    run_id: Optional[str] = Field(default=None, index=True)
+    run_id: str | None = Field(default=None, index=True)
     artifact_type: str = Field(index=True)
     path: str
-    version: Optional[str] = None
-    parent_id: Optional[str] = None
+    version: str | None = None
+    parent_id: str | None = None
     created_at: str
 
 

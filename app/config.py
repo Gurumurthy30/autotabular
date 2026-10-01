@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 # Load .env file
@@ -18,6 +19,9 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "https://ollama.com")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:120b")
 
+# Context window size for the LLM (tokens) — passed to ChatOllama as num_ctx
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
+
 # MLflow configuration
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
 
@@ -32,6 +36,10 @@ def validate_config() -> None:
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL environment variable must be set (e.g. sqlite:///app_metadata.db)")
 
+    from app.utils.logger import get_logger
+    log = get_logger(__name__)
+    log.info("[CONFIG] OLLAMA_MODEL=%s OLLAMA_NUM_CTX=%d", OLLAMA_MODEL, OLLAMA_NUM_CTX)
+
     # If pointing to Ollama Cloud API (https://ollama.com), ensure API key is present
     if "ollama.com" in OLLAMA_BASE_URL.lower() and not OLLAMA_API_KEY.strip():
         raise RuntimeError(
@@ -41,4 +49,3 @@ def validate_config() -> None:
 
     # Ensure projects root directory exists and is writable
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
-

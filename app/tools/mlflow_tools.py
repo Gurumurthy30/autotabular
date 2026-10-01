@@ -1,7 +1,9 @@
+from typing import Any
+
 import mlflow
 import mlflow.tracking
 from mlflow.exceptions import MlflowException
-from typing import Any
+
 from app.config import MLFLOW_TRACKING_URI
 from app.utils.logger import get_logger
 

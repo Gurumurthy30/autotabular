@@ -18,7 +18,6 @@ export function TriggerRunModal({ projectId, datasets, onTriggered }: TriggerRun
   );
   const [targetColumn, setTargetColumn] = useState("");
   const [targetMetric, setTargetMetric] = useState("");
-  const [maxIterations, setMaxIterations] = useState(3);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,7 +44,6 @@ export function TriggerRunModal({ projectId, datasets, onTriggered }: TriggerRun
         target_column: targetColumn.trim() || undefined,
         target_metric: targetMetric.trim() || undefined,
         dataset_version: datasetVersion,
-        constraints: { max_iterations: Number(maxIterations) || 3 },
       });
 
       setIsTriggerRunOpen(false);
@@ -124,19 +122,6 @@ export function TriggerRunModal({ projectId, datasets, onTriggered }: TriggerRun
               value={targetMetric}
               onChange={(e) => setTargetMetric(e.target.value)}
               className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-100 placeholder-slate-500 focus:outline-none focus:border-sky-500 font-mono"
-            />
-          </div>
-
-          {/* Max Iterations */}
-          <div>
-            <label className="block text-slate-300 font-medium mb-1">Max Iterations (Loop Ceiling)</label>
-            <input
-              type="number"
-              min={1}
-              max={5}
-              value={maxIterations}
-              onChange={(e) => setMaxIterations(Number(e.target.value))}
-              className="w-24 px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-slate-100 font-mono focus:outline-none focus:border-sky-500"
             />
           </div>
 

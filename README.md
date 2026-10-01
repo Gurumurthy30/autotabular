@@ -11,8 +11,9 @@ This platform is an autonomous multi-agent system designed to execute complete t
 
 ## Key Features
 
-- **Multi-Agent LangGraph Workflow**: Specialized agents (Supervisor, Profile, EDA, Feature Engineering, Model, Evaluator, Report) execute in a strictly coordinated state graph.
-- **Self-Correcting Evaluation Loop**: Dynamic Model ↔ Evaluator feedback loop critiques overfitting, residual patterns, and data leakage, triggering bounded iterative improvements.
+- **Supervisor-Led Multi-Agent Workflow**: A central Lead ML Supervisor dynamically orchestrates specialized workers (Profile, EDA, Feature Engineering, Model, Judge, Report) in an unconstrained, judgment-driven state graph.
+- **Hypothesis-Driven Feature Engineering & Paired Cross-Validation**: Data leakage prevention with safe transformers, paired cross-validation folds, and statistical noise-floor checks.
+- **Judge Quality Review**: Specialist Judge agent evaluates pipeline integrity, overfitting gaps, and validation soundness.
 - **Full Experiment Tracking**: Native MLflow integration logs parameters, metrics, pickled model artifacts, and predictions alongside SQLite metadata versioning.
 - **Kaggle-Style Submission Engine**: Generates out-of-sample predictions and submission-ready CSV files directly from any checkpointed model.
 - **Real-Time Agent Streaming**: Live Server-Sent Events (SSE) stream agent thoughts, decisions, code execution logs, and phase transitions to the web interface.
@@ -31,7 +32,7 @@ flowchart LR
         EDA[EDA Agent]
         FE[Feature Engineering]
         Mod[Model Agent]
-        Eval[Evaluator Agent]
+        Judge[Judge Agent]
         Rep[Report Agent]
         Coder[Coder Sub-Agent]
     end

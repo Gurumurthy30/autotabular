@@ -1,9 +1,8 @@
-from typing import Any
-from app.tools.file_tools import FileTools
+from app.tools.artifact_index import ArtifactIndex
 from app.tools.dataset_tools import DatasetTools
 from app.tools.execution_manager import ExecutionManager
+from app.tools.file_tools import FileTools
 from app.tools.mlflow_tools import MLflowTools
-from app.tools.artifact_index import ArtifactIndex
 
 
 class AgentTools:
@@ -42,42 +41,19 @@ class ToolRegistry:
                 file_tools=self._file_tools,
                 execution_manager=self._execution_manager,
             )
-        elif role == "profile":
+        elif role == "profile" or role == "eda" or role == "feature_engineering":
             return AgentTools(
                 file_tools=self._file_tools,
                 dataset_tools=self._dataset_tools,
                 artifact_index=self._artifact_index,
             )
-        elif role == "eda":
-            return AgentTools(
-                file_tools=self._file_tools,
-                dataset_tools=self._dataset_tools,
-                artifact_index=self._artifact_index,
-            )
-        elif role == "feature_engineering":
-            return AgentTools(
-                file_tools=self._file_tools,
-                dataset_tools=self._dataset_tools,
-                artifact_index=self._artifact_index,
-            )
-        elif role == "model":
+        elif role in ("model", "judge", "evaluator"):
             return AgentTools(
                 file_tools=self._file_tools,
                 mlflow_tools=self._mlflow_tools,
                 artifact_index=self._artifact_index,
             )
-        elif role == "evaluator":
-            return AgentTools(
-                file_tools=self._file_tools,
-                mlflow_tools=self._mlflow_tools,
-                artifact_index=self._artifact_index,
-            )
-        elif role == "report":
-            return AgentTools(
-                file_tools=self._file_tools,
-                artifact_index=self._artifact_index,
-            )
-        elif role == "supervisor":
+        elif role == "report" or role == "supervisor":
             return AgentTools(
                 file_tools=self._file_tools,
                 artifact_index=self._artifact_index,

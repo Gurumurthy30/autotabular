@@ -1,5 +1,5 @@
-import os
 from pathlib import Path
+
 from app.config import PROJECTS_DIR
 
 

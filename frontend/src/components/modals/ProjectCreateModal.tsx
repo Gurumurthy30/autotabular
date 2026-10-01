@@ -13,7 +13,6 @@ export function ProjectCreateModal({ onCreated }: { onCreated?: () => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [targetColumn, setTargetColumn] = useState("");
   const [targetMetric, setTargetMetric] = useState("");
-  const [maxIterations, setMaxIterations] = useState(3);
   const [startRunImmediately, setStartRunImmediately] = useState(true);
 
   const [isLoading, setIsLoading] = useState(false);
@@ -61,7 +60,6 @@ export function ProjectCreateModal({ onCreated }: { onCreated?: () => void }) {
           target_column: targetColumn.trim(),
           target_metric: targetMetric.trim() || undefined,
           dataset_version: ds.version,
-          constraints: { max_iterations: Number(maxIterations) || 3 },
         });
       }
 
@@ -181,7 +179,7 @@ export function ProjectCreateModal({ onCreated }: { onCreated?: () => void }) {
             </div>
           </div>
 
-          {/* Constraints & Options */}
+          {/* Options */}
           <div className="flex items-center justify-between pt-1">
             <div className="flex items-center gap-2">
               <input
@@ -194,17 +192,6 @@ export function ProjectCreateModal({ onCreated }: { onCreated?: () => void }) {
               <label htmlFor="start-run-checkbox" className="text-slate-300 select-none">
                 Start initial run immediately if target provided
               </label>
-            </div>
-            <div className="flex items-center gap-1.5 font-mono">
-              <span className="text-slate-400 text-[11px]">Max Iter:</span>
-              <input
-                type="number"
-                min={1}
-                max={5}
-                value={maxIterations}
-                onChange={(e) => setMaxIterations(Number(e.target.value))}
-                className="w-12 px-1.5 py-1 bg-slate-900 border border-slate-700 rounded text-center text-slate-100 text-xs"
-              />
             </div>
           </div>
 

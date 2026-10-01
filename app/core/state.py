@@ -1,6 +1,7 @@
 import json
 from enum import Enum
-from typing import Literal, TypedDict, Any
+from typing import Any, Literal, TypedDict
+
 from pydantic import BaseModel, Field
 
 from app.utils.logger import get_logger
@@ -15,43 +16,48 @@ class TaskType(str, Enum):
     AMBIGUOUS = "ambiguous"
 
 
-class ProjectState(TypedDict):
+class ProjectState(TypedDict, total=False):
     project_id: str
     run_id: str
     user_goal: str
     target_column: str | None
     target_metric: str | None          # e.g. "f1", "roc_auc", "rmse", "r2"
-    description: str | None
-    constraints: dict
 
-    dataset_id: str
     dataset_version: str
-
     task_type: TaskType | None
 
     profile_summary: dict
     eda_findings: dict
     feature_summary: dict
     model_summary: dict
-    evaluation_summary: dict
 
     current_stage: str
-    iteration: int
-    max_iterations: int
+    iteration: int                     # for UI/DB compatibility (reflects version count)
+    step: int                          # current supervisor step count (0, 1, 2, ...)
+    plan: list[dict]                   # [{id, text, status: todo|doing|done|dropped}]
+    current_version: str | None        # e.g. "v1", "v2"
+    best_version: str | None           # e.g. "v1"
+    open_concern: dict | None          # {claim, evidence, suggestion}
+    guard_note: str | None
+    worker_runs: dict[str, int]        # counts per worker e.g. {"profile": 1, ...}
+    report: dict | None                # last worker report dict
 
     best_experiment_id: str | None     # MLflow run_id
     best_metric_value: float | None
 
-    supervisor_memory: dict
     artifacts: list[dict]              # references only, never raw content
 
     next_action: str | None
     status: Literal["SUCCESS", "FAILED", "NEEDS_INPUT", "RETRY", "RUNNING"]
+    error: str | None
+    split_train_path: str | None
+    split_val_path: str | None
+
 
 
 # --- Structured Output Models for Agents ---
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import field_validator, model_validator
 
 
 class ColumnProfile(BaseModel):
@@ -67,13 +73,20 @@ class ColumnProfile(BaseModel):
 class ProfileSummary(BaseModel):
     row_count: int
     column_count: int
-    columns: list[ColumnProfile]
+    columns: list[ColumnProfile] = Field(default_factory=list)
     target_column: str | None = None
     task_type_guess: TaskType
     duplicates_count: int
     missing_total_pct: float
     target_distribution: dict[str, Any] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
+    column_roles: dict[str, str] = Field(default_factory=dict)
+    id_suspects: list[dict[str, Any]] = Field(default_factory=list)
+    row_order_meaningful: bool = False
+    possible_time_column: str | None = None
+    possible_group_columns: list[str] = Field(default_factory=list)
+    near_duplicate_pairs: list[list[str]] = Field(default_factory=list)
+    compact: str = ""
 
 
 def _convert_numpy_types(obj: Any) -> Any:
@@ -171,23 +184,46 @@ def to_evidence_str(data: Any, _field: str = "evidence") -> str:
 
 
 class EDAFindingItem(BaseModel):
-    category: str = Field(description="e.g. correlation, skewness, outliers, leakage, class_imbalance")
-    finding: str = Field(description="Clear statement of what was discovered")
-    evidence: str = Field(description="Numerical statistics or evidence supporting the finding (formatted as string)")
-    implication: str = Field(description="Impact on modeling or feature engineering")
-    recommendation: str = Field(description="Actionable suggestion for feature engineering")
+    id: str = ""
+    category: str = Field(default="general", description="e.g. correlation, skewness, outliers, leakage, class_imbalance")
+    finding: str = Field(default="", description="Clear statement of what was discovered")
+    evidence: str = Field(default="", description="Numerical statistics or evidence supporting the finding (formatted as string)")
+    implication: str = Field(default="", description="Impact on modeling or feature engineering")
+    recommendation: str = Field(default="", description="Actionable suggestion for feature engineering")
+    priority: Literal["high", "med", "low"] = "med"
 
     @field_validator("evidence", mode="before")
     @classmethod
     def coerce_evidence_to_str(cls, v: Any) -> str:
         return to_evidence_str(v, _field="EDAFindingItem.evidence")
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_finding_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            p = str(data.get("priority", "med")).lower()
+            if p not in ("high", "med", "low"):
+                p = "med"
+            data["priority"] = p
+            if data.get("implication") is None:
+                data["implication"] = ""
+        return data
+
 
 class EDAOutput(BaseModel):
-    executive_summary: str
-    findings: list[EDAFindingItem]
+    executive_summary: str = ""
+    findings: list[EDAFindingItem] = Field(default_factory=list)
     leakage_risks: list[str] = Field(default_factory=list)
     suggested_feature_ideas: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def autofill_finding_ids(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "findings" in data and isinstance(data["findings"], list):
+            for i, f in enumerate(data["findings"], 1):
+                if isinstance(f, dict) and not f.get("id"):
+                    f["id"] = f"E{i}"
+        return data
 
     @field_validator("findings", mode="before")
     @classmethod
@@ -256,50 +292,6 @@ class ModelStageOutput(BaseModel):
     summary: str
 
 
-from pydantic import BaseModel, Field, field_validator, model_validator
-
-
-class EvaluatorIssue(BaseModel):
-    check_name: str = "general_check"
-    severity: Literal["HIGH", "MEDIUM", "LOW"] = "MEDIUM"
-    description: str = ""
-    suggested_fix: str = ""
-
-    @model_validator(mode="before")
-    @classmethod
-    def normalize_issue(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            c_name = data.get("check_name") or data.get("issue") or data.get("name") or "model_check"
-            sev = str(data.get("severity", "MEDIUM")).upper()
-            if sev not in ("HIGH", "MEDIUM", "LOW"):
-                sev = "MEDIUM"
-            desc = data.get("description") or data.get("issue") or data.get("details") or str(data)
-            fix = data.get("suggested_fix") or data.get("fix") or data.get("recommendation") or "Apply regularization or review features."
-            return {
-                "check_name": str(c_name),
-                "severity": sev,
-                "description": str(desc),
-                "suggested_fix": str(fix),
-            }
-        elif isinstance(data, str):
-            return {
-                "check_name": "check",
-                "severity": "MEDIUM",
-                "description": data,
-                "suggested_fix": "Review model",
-            }
-        return data
-
-
-class EvaluatorOutput(BaseModel):
-    verdict: Literal["PASS", "IMPROVE"] = "PASS"
-    target_metric: str = "metric"
-    primary_metric_value: float = 0.0
-    issues_found: list[EvaluatorIssue] = Field(default_factory=list)
-    recommended_next_stage: Literal["feature_engineering", "model"] = "feature_engineering"
-    reasoning: str = ""
-
-
 class ReportSummaryOutput(BaseModel):
     project_id: str
     objective: str
@@ -316,6 +308,8 @@ class ReportSummaryOutput(BaseModel):
     @classmethod
     def clean_report_summary(cls, data: Any) -> Any:
         if isinstance(data, dict):
+            if data.get("best_model_name") is None:
+                data["best_model_name"] = "N/A"
             if data.get("best_score") is None:
                 data["best_score"] = 0.0
             if data.get("iterations_run") is None:
@@ -334,11 +328,3 @@ class ReportSummaryOutput(BaseModel):
                     coerced.append(str(item))
             return coerced
         return v
-
-
-
-class SupervisorReview(BaseModel):
-    action: Literal["PROCEED", "RETRY", "IMPROVE", "COMPLETE", "FAIL"]
-    next_stage: str
-    reasoning: str
-    instructions_for_next_stage: str

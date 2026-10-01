@@ -23,12 +23,13 @@ export interface WorkflowRun {
   dataset_version: string;
   target_column?: string;
   target_metric?: string;
-  status: "PENDING" | "RUNNING" | "NEEDS_INPUT" | "SUCCESS" | "FAILED";
+  status: "PENDING" | "RUNNING" | "NEEDS_INPUT" | "SUCCESS" | "FAILED" | "CANCELLED";
   current_stage: string;
   iteration: number;
   best_experiment_id?: string;
   best_metric_value?: number;
   error?: string;
+  degraded?: boolean;
   created_at: string;
   completed_at?: string;
 }
@@ -79,7 +80,12 @@ export type EventType =
   | "EXPERIMENT_COMPLETED"
   | "EVALUATION_FAILED"
   | "SUPERVISOR_DECISION"
-  | "WORKFLOW_COMPLETED";
+  | "supervisor_decision"
+  | "worker_report"
+  | "guard_override"
+  | "concern"
+  | "WORKFLOW_COMPLETED"
+  | (string & {});
 
 export interface PipelineEvent {
   id: string;

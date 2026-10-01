@@ -1,9 +1,11 @@
 import os
-import sys
 import shutil
 import subprocess
+import sys
+from datetime import UTC
 from pathlib import Path
 from typing import Any
+
 from app.config import PROJECTS_DIR
 
 
@@ -76,10 +78,10 @@ class ExecutionManager:
         attempt: int | None = None,
     ) -> ExecutionResult:
         """Writes script_content into the clean workspace, executes it via subprocess, and records execution history."""
+        import json
         import time
         import uuid
-        import json
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         ws = self._prepare_workspace()
         script_file = ws / script_name
@@ -111,14 +113,35 @@ class ExecutionManager:
             env=env,
         )
 
-        stdout, stderr = process.communicate()
+        self.current_process = process
+        try:
+            while True:
+                try:
+                    stdout, stderr = process.communicate(timeout=0.5)
+                    break
+                except subprocess.TimeoutExpired:
+                    if run_id:
+                        from app.core.run_memory import RunMemory
+                        mem = RunMemory(self.project_id, run_id)
+                        if mem.is_cancelled():
+                            process.kill()
+                            stdout, stderr = process.communicate()
+                            return ExecutionResult(
+                                exit_code=-9,
+                                stdout=stdout or "",
+                                stderr="Execution cancelled by user",
+                                workspace_dir=str(ws),
+                            )
+        finally:
+            self.current_process = None
+
         duration_ms = int((time.time() - start_time) * 1000)
 
         # Persist execution history for monitoring the coder agent
         try:
             exec_dir = PROJECTS_DIR / self.project_id / "code_executions"
             exec_dir.mkdir(parents=True, exist_ok=True)
-            now_dt = datetime.now(timezone.utc)
+            now_dt = datetime.now(UTC)
             record_id = f"exec_{int(now_dt.timestamp())}_{uuid.uuid4().hex[:6]}"
             record = {
                 "id": record_id,

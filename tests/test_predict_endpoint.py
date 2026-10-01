@@ -1,8 +1,19 @@
 import io
+import os
+from pathlib import Path
+
+import joblib
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
-from app.main import app
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import Pipeline
+
 from app.db.session import init_db
+from app.main import app
+from app.tools.mlflow_tools import MLflowTools
 
 client = TestClient(app)
 
@@ -13,6 +24,20 @@ def test_predict_endpoint_flow():
     # 1. Project house_price_predection should exist on disk
     train_csv_path = "projects/house_price_predection/datasets/dataset_v1/data.csv"
     train_df = pd.read_csv(train_csv_path)
+
+    # Ensure model and MLflow run exist
+    models_dir = Path("projects/house_price_predection/models")
+    models_dir.mkdir(parents=True, exist_ok=True)
+    best_pkl = models_dir / "best_model.pkl"
+    if not best_pkl.exists():
+        num_cols = train_df.drop(columns=["price", "id"], errors="ignore").select_dtypes(include=["number"]).columns
+        pipe = Pipeline([("imputer", SimpleImputer(strategy="median")), ("model", Ridge())])
+        pipe.fit(train_df[num_cols], train_df["price"])
+        joblib.dump(pipe, best_pkl)
+
+    m_housing = MLflowTools("house_price_predection")
+    if not m_housing.get_leaderboard("rmse"):
+        m_housing.log_run("baseline_ridge", params={}, metrics={"rmse": 25000.0}, artifact_paths=[str(best_pkl)])
 
     # Make test dataframe with 10 rows without price
     test_df = train_df.head(10).drop(columns=["price"])
@@ -92,6 +117,10 @@ def test_predict_endpoint_flow():
     assert res_404.status_code == 404
 
 
+@pytest.mark.skipif(
+    not os.path.exists("projects/binary_rainfall_predection/datasets/dataset_v1/data.csv"),
+    reason="binary_rainfall_predection dataset not found on disk",
+)
 def test_predict_raw_data_auto_feature_engineering():
     """Verify that uploading unprocessed raw data auto-applies feature_pipeline.pkl."""
     init_db()
@@ -99,13 +128,37 @@ def test_predict_raw_data_auto_feature_engineering():
     train_csv_path = "projects/binary_rainfall_predection/datasets/dataset_v1/data.csv"
     train_df = pd.read_csv(train_csv_path)
 
+    # Setup model and pipeline if needed
+    models_dir = Path("projects/binary_rainfall_predection/models")
+    models_dir.mkdir(parents=True, exist_ok=True)
+    features_dir = Path("projects/binary_rainfall_predection/features")
+    features_dir.mkdir(parents=True, exist_ok=True)
+
+    pipe_pkl = features_dir / "feature_pipeline.pkl"
+    best_model_pkl = models_dir / "best_model.pkl"
+    raw_X = train_df.drop(columns=["rainfall"], errors="ignore")
+
+    from app.ml_harness.preprocess import make_basic_preprocessor
+
+    col_roles = {c: ("target" if c == "rainfall" else ("id" if c in ("id",) else "numeric")) for c in train_df.columns}
+    feat_pipe = make_basic_preprocessor({"column_roles": col_roles})
+    feat_pipe.fit(raw_X)
+    joblib.dump(feat_pipe, pipe_pkl)
+
+    model = HistGradientBoostingClassifier(random_state=42)
+    model.fit(feat_pipe.transform(raw_X), train_df["rainfall"])
+    joblib.dump(model, best_model_pkl)
+
+    m_rain = MLflowTools("binary_rainfall_predection")
+    run_id = m_rain.log_run("GradientBoosting_test", params={}, metrics={"f1": 0.88}, artifact_paths=[str(best_model_pkl)])
+
     # 10 raw rows without rainfall target
     raw_test_df = train_df.head(10).drop(columns=["rainfall"])
     csv_buf = io.BytesIO()
     raw_test_df.to_csv(csv_buf, index=False)
 
     res = client.post(
-        "/projects/binary_rainfall_predection/models/f802a1aa7cc148e7a159258353c0105d/predict",
+        f"/projects/binary_rainfall_predection/models/{run_id}/predict",
         files={"test_file": ("raw_test.csv", csv_buf.getvalue(), "text/csv")},
     )
     assert res.status_code == 200, res.text
@@ -117,6 +170,10 @@ def test_predict_raw_data_auto_feature_engineering():
     assert not pred_df["rainfall"].isna().any()
 
 
+@pytest.mark.skipif(
+    not os.path.exists("projects/binary_rainfall_predection/datasets/dataset_v1/data.csv"),
+    reason="binary_rainfall_predection dataset not found on disk",
+)
 def test_predict_gradient_boosting_with_nans():
     """Verify that uploading test data with NaNs does not crash GradientBoosting with NaN error."""
     import numpy as np
@@ -125,6 +182,25 @@ def test_predict_gradient_boosting_with_nans():
 
     train_csv_path = "projects/binary_rainfall_predection/datasets/dataset_v1/data.csv"
     train_df = pd.read_csv(train_csv_path)
+
+    models_dir = Path("projects/binary_rainfall_predection/models")
+    features_dir = Path("projects/binary_rainfall_predection/features")
+    best_model_pkl = models_dir / "best_model.pkl"
+    pipe_pkl = features_dir / "feature_pipeline.pkl"
+
+    raw_X = train_df.drop(columns=["rainfall"], errors="ignore")
+    from app.ml_harness.preprocess import make_basic_preprocessor
+    col_roles = {c: ("target" if c == "rainfall" else ("id" if c in ("id",) else "numeric")) for c in train_df.columns}
+    feat_pipe = make_basic_preprocessor({"column_roles": col_roles})
+    feat_pipe.fit(raw_X)
+    joblib.dump(feat_pipe, pipe_pkl)
+
+    model = HistGradientBoostingClassifier(random_state=42)
+    model.fit(feat_pipe.transform(raw_X), train_df["rainfall"])
+    joblib.dump(model, best_model_pkl)
+
+    m_rain = MLflowTools("binary_rainfall_predection")
+    run_id = m_rain.log_run("GradientBoosting_nans_test", params={}, metrics={"f1": 0.88}, artifact_paths=[str(best_model_pkl)])
 
     # 50 rows with injected missing values
     test_df = train_df.iloc[1460:1510].drop(columns=["rainfall"]).copy()
@@ -136,7 +212,7 @@ def test_predict_gradient_boosting_with_nans():
     test_df.to_csv(csv_buf, index=False)
 
     res = client.post(
-        "/projects/binary_rainfall_predection/models/a10babff802d4afa858f6bcbe482b274/predict",
+        f"/projects/binary_rainfall_predection/models/{run_id}/predict",
         files={"test_file": ("test_with_nans.csv", csv_buf.getvalue(), "text/csv")},
     )
     assert res.status_code == 200, res.text
@@ -146,4 +222,3 @@ def test_predict_gradient_boosting_with_nans():
     assert list(pred_df.columns) == ["id", "rainfall"]
     assert len(pred_df) == 50
     assert not pred_df["rainfall"].isna().any()
-

@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
 from app.config import BASE_DIR
 
 DB_PATH = BASE_DIR / "app_metadata.db"
