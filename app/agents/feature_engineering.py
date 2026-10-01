@@ -211,23 +211,38 @@ Worker Brief:
 MANDATORY CONTRACT RULES (The harness will verify these):
 1. Define a function: def make_feature_pipeline() -> sklearn Pipeline / ColumnTransformer
 2. Return a FRESH, UNFITTED sklearn-compatible transformer.
-3. NEVER call train_test_split.
+3. NEVER call train_test_split. The harness handles all CV splitting inside each fold.
 4. NEVER transform the full dataset.
 5. Use safe transformers from app.ml_harness.transformers:
-   (DropColumns, DateParts, CyclicEncoder, PairOps, LogPower, ClipQuantiles, FrequencyEncoder, TargetEncoderCV, RollingLag)
-   or subclass SafeTransformer from app.ml_harness.base.
+   - DropColumns(columns=[...])
+   - DateParts(columns=[...])
+   - CyclicEncoder(columns=[...], period=24.0)
+   - PairOps(pairs=[("colA", "colB")], ops=["diff", "ratio", "sum", "prod"])
+   - LogPower(columns=[...], method="log1p")
+   - ClipQuantiles(columns=[...], lower=0.01, upper=0.99)
+   - FrequencyEncoder(columns=[...])
+   - TargetEncoderCV(columns=[...], smoothing=10.0)
+   - RollingLag(columns=[...], lags=[1, 2], roll_windows=[3])
+   Or subclass SafeTransformer from app.ml_harness.base.
 6. The pipeline must NEVER output the target column '{target_col}'.
 7. Ensure all features produce no NaNs and are picklable with joblib.
+8. At the bottom of the script, include an `if __name__ == '__main__':` block that loads a small sample (50 rows) from '{dataset_path_str}', creates make_feature_pipeline(), and calls pipe.fit_transform(X_sample) to verify there are no runtime or contract errors.
 """
         max_attempts = 4
         last_error = ""
+
+        coder_context = {
+            "stage": "feature_engineering",
+            "run_id": run_id,
+            "brief": brief.model_dump() if hasattr(brief, "model_dump") else str(brief),
+        }
 
         for attempt in range(max_attempts):
             task_desc = coder_prompt
             if last_error:
                 task_desc += f"\n\nPREVIOUS ATTEMPT FAILED THE HARNESS CONTRACT CHECK:\n{last_error}\nFix the pipeline to resolve this error."
 
-            coder_res = coder.run_task(task_description=task_desc, context=brief)
+            coder_res = coder.run_task(task_description=task_desc, context=coder_context)
             if coder_res["status"] == "FAILED":
                 last_error = coder_res.get("error", "Script generation failed")
                 continue
@@ -264,19 +279,33 @@ MANDATORY CONTRACT RULES (The harness will verify these):
                 temp_script.unlink(missing_ok=True)
 
         if unfitted_pipeline is None:
-            err_msg = f"Feature pipeline failed contract checks after {max_attempts} attempts: {last_error}"
-            _log.error("[FE] %s", err_msg)
-            return {
-                "status": "FAILED",
-                "current_stage": "feature_engineering",
-                "error": err_msg,
-                "report": WorkerReport(
-                    status="failed",
-                    result_summary=err_msg[:300],
-                    evidence={"error": err_msg},
-                    notebook={"step": step, "tried": f"FE {mode} mode", "outcome": "failed", "lesson": last_error[:200]},
-                ).model_dump(),
-            }
+            _log.warning(
+                "[FE] Feature pipeline failed contract checks after %d attempts (%s). "
+                "Falling back gracefully to deterministic basic preprocessor.",
+                max_attempts,
+                last_error,
+            )
+            try:
+                unfitted_pipeline = make_basic_preprocessor(profile)
+                pipeline_script_content = _build_basic_script(profile)
+                sample_out, kept_features, removed_features = postprocess_features(
+                    unfitted_pipeline, sample_X, target_col=target_col
+                )
+                unfitted_pipeline = make_basic_preprocessor(profile)
+            except Exception as fb_exc:
+                err_msg = f"Feature pipeline failed contract checks after {max_attempts} attempts: {last_error}; fallback failed: {fb_exc}"
+                _log.error("[FE] %s", err_msg)
+                return {
+                    "status": "FAILED",
+                    "current_stage": "feature_engineering",
+                    "error": err_msg,
+                    "report": WorkerReport(
+                        status="failed",
+                        result_summary=err_msg[:300],
+                        evidence={"error": err_msg},
+                        notebook={"step": step, "tried": f"FE {mode} mode", "outcome": "failed", "lesson": last_error[:200]},
+                    ).model_dump(),
+                }
 
     # 3. Save artifacts (both run-scoped and project-scoped)
     # Save script

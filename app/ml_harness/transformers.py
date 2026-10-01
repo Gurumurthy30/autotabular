@@ -12,9 +12,10 @@ from app.ml_harness.base import SafeTransformer
 class DropColumns(SafeTransformer):
     """Drops specified columns safely."""
 
-    def __init__(self, columns: Sequence[str] | None = None):
+    def __init__(self, columns: Sequence[str] | None = None, **kwargs: Any):
         super().__init__()
-        self.columns = list(columns) if columns else []
+        cols = columns or kwargs.get("cols") or kwargs.get("drop_cols") or kwargs.get("drop") or kwargs.get("columns_to_drop")
+        self.columns = list(cols) if cols else []
 
     def fit(self, X: Any, y: Any = None) -> "DropColumns":
         super().fit(X, y)
@@ -39,9 +40,10 @@ class DropColumns(SafeTransformer):
 class DateParts(SafeTransformer):
     """Extracts date parts from datetime columns (month, day, dayofweek, dayofyear, is_weekend)."""
 
-    def __init__(self, columns: Sequence[str] | None = None):
+    def __init__(self, columns: Sequence[str] | None = None, **kwargs: Any):
         super().__init__()
-        self.columns = list(columns) if columns else []
+        cols = columns or kwargs.get("cols") or kwargs.get("date_cols") or kwargs.get("datetime_cols") or kwargs.get("features")
+        self.columns = list(cols) if cols else []
         self.out_features_: list[str] = []
 
     def fit(self, X: Any, y: Any = None) -> "DateParts":
@@ -81,10 +83,12 @@ class DateParts(SafeTransformer):
 class CyclicEncoder(SafeTransformer):
     """Encodes periodic features into sin/cos coordinates."""
 
-    def __init__(self, columns: Sequence[str] | None = None, period: float = 24.0):
+    def __init__(self, columns: Sequence[str] | None = None, period: float = 24.0, **kwargs: Any):
         super().__init__()
-        self.columns = list(columns) if columns else []
-        self.period = float(period)
+        cols = columns or kwargs.get("cols") or kwargs.get("features")
+        self.columns = list(cols) if cols else []
+        p = kwargs.get("period", kwargs.get("periods", kwargs.get("cycle", period)))
+        self.period = float(p)
         self.out_features_: list[str] = []
 
     def fit(self, X: Any, y: Any = None) -> "CyclicEncoder":
@@ -116,10 +120,17 @@ class CyclicEncoder(SafeTransformer):
 class PairOps(SafeTransformer):
     """Computes difference, ratio, sum, or product between pairs of columns with safe division."""
 
-    def __init__(self, pairs: list[tuple[str, str]] | None = None, ops: Sequence[str] = ("diff", "ratio")):
+    def __init__(
+        self,
+        pairs: list[tuple[str, str]] | None = None,
+        ops: Sequence[str] = ("diff", "ratio"),
+        **kwargs: Any,
+    ):
         super().__init__()
-        self.pairs = list(pairs) if pairs else []
-        self.ops = list(ops)
+        p = pairs or kwargs.get("col_pairs") or kwargs.get("pairs")
+        self.pairs = list(p) if p else []
+        op_list = kwargs.get("ops", kwargs.get("operations", kwargs.get("op", ops)))
+        self.ops = list(op_list) if isinstance(op_list, (list, tuple)) else [str(op_list)]
         self.out_features_: list[str] = []
 
     def fit(self, X: Any, y: Any = None) -> "PairOps":
@@ -158,10 +169,11 @@ class PairOps(SafeTransformer):
 class LogPower(SafeTransformer):
     """Applies log1p or power transformation on specified skewed columns."""
 
-    def __init__(self, columns: Sequence[str] | None = None, method: str = "log1p"):
+    def __init__(self, columns: Sequence[str] | None = None, method: str = "log1p", **kwargs: Any):
         super().__init__()
-        self.columns = list(columns) if columns else []
-        self.method = method
+        cols = columns or kwargs.get("cols") or kwargs.get("features")
+        self.columns = list(cols) if cols else []
+        self.method = str(kwargs.get("method", kwargs.get("func", kwargs.get("mode", method))))
 
     def fit(self, X: Any, y: Any = None) -> "LogPower":
         super().fit(X, y)
@@ -190,11 +202,32 @@ class LogPower(SafeTransformer):
 class ClipQuantiles(SafeTransformer):
     """Clips continuous column values to lower and upper quantiles fitted on training data."""
 
-    def __init__(self, columns: Sequence[str] | None = None, lower: float = 0.01, upper: float = 0.99):
+    def __init__(
+        self,
+        columns: Sequence[str] | None = None,
+        lower: float = 0.01,
+        upper: float = 0.99,
+        **kwargs: Any,
+    ):
         super().__init__()
-        self.columns = list(columns) if columns else []
-        self.lower = float(lower)
-        self.upper = float(upper)
+        cols = columns or kwargs.get("cols") or kwargs.get("features") or kwargs.get("column_names")
+        self.columns = list(cols) if cols else []
+        low = kwargs.get(
+            "lower_quantile",
+            kwargs.get("lower_percentile", kwargs.get("q_low", kwargs.get("min_quantile", lower)))
+        )
+        high = kwargs.get(
+            "upper_quantile",
+            kwargs.get("upper_percentile", kwargs.get("q_high", kwargs.get("max_quantile", upper)))
+        )
+        low_f = float(low)
+        high_f = float(high)
+        if low_f > 1.0:
+            low_f /= 100.0
+        if high_f > 1.0:
+            high_f /= 100.0
+        self.lower = low_f
+        self.upper = high_f
         self.bounds_: dict[str, tuple[float, float]] = {}
 
     def fit(self, X: Any, y: Any = None) -> "ClipQuantiles":
@@ -225,9 +258,10 @@ class ClipQuantiles(SafeTransformer):
 class FrequencyEncoder(SafeTransformer):
     """Encodes categorical columns by frequency of categories learned in fit."""
 
-    def __init__(self, columns: Sequence[str] | None = None):
+    def __init__(self, columns: Sequence[str] | None = None, **kwargs: Any):
         super().__init__()
-        self.columns = list(columns) if columns else []
+        cols = columns or kwargs.get("cols") or kwargs.get("cat_cols") or kwargs.get("features")
+        self.columns = list(cols) if cols else []
         self.freq_maps_: dict[str, dict[Any, float]] = {}
 
     def fit(self, X: Any, y: Any = None) -> "FrequencyEncoder":
@@ -257,10 +291,12 @@ class FrequencyEncoder(SafeTransformer):
 class TargetEncoderCV(SafeTransformer):
     """Smoothed target encoding fit inside folds to prevent data leakage."""
 
-    def __init__(self, columns: Sequence[str] | None = None, smoothing: float = 10.0):
+    def __init__(self, columns: Sequence[str] | None = None, smoothing: float = 10.0, **kwargs: Any):
         super().__init__()
-        self.columns = list(columns) if columns else []
-        self.smoothing = float(smoothing)
+        cols = columns or kwargs.get("cols") or kwargs.get("cat_cols") or kwargs.get("features")
+        self.columns = list(cols) if cols else []
+        s = kwargs.get("smoothing", kwargs.get("smooth", kwargs.get("alpha", smoothing)))
+        self.smoothing = float(s)
         self.target_maps_: dict[str, dict[Any, float]] = {}
         self.global_mean_ = 0.0
 
@@ -300,11 +336,20 @@ class TargetEncoderCV(SafeTransformer):
 class RollingLag(SafeTransformer):
     """Computes lags and rolling statistics ONLY for time-split datasets."""
 
-    def __init__(self, columns: Sequence[str] | None = None, lags: Sequence[int] = (1, 2), roll_windows: Sequence[int] = (3,)):
+    def __init__(
+        self,
+        columns: Sequence[str] | None = None,
+        lags: Sequence[int] = (1, 2),
+        roll_windows: Sequence[int] = (3,),
+        **kwargs: Any,
+    ):
         super().__init__()
-        self.columns = list(columns) if columns else []
-        self.lags = list(lags)
-        self.roll_windows = list(roll_windows)
+        cols = columns or kwargs.get("cols") or kwargs.get("features")
+        self.columns = list(cols) if cols else []
+        lag_val = kwargs.get("lags", kwargs.get("lag", lags))
+        self.lags = list(lag_val) if isinstance(lag_val, (list, tuple, range)) else [int(lag_val)]
+        win_val = kwargs.get("roll_windows", kwargs.get("rolling_windows", kwargs.get("windows", roll_windows)))
+        self.roll_windows = list(win_val) if isinstance(win_val, (list, tuple, range)) else [int(win_val)]
         self.out_features_: list[str] = []
 
     def fit(self, X: Any, y: Any = None) -> "RollingLag":

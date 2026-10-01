@@ -280,3 +280,81 @@ def test_delete_project_purges_all_artifacts_and_mlflow():
         assert not (BASE_DIR / "mlruns" / dummy_exp_id).exists()
 
 
+def test_transformers_flexible_kwargs_and_clip_quantiles_aliases():
+    """Verify ClipQuantiles and all SafeTransformers gracefully handle kwargs and parameter aliases."""
+    from app.ml_harness.transformers import (
+        ClipQuantiles,
+        CyclicEncoder,
+        DateParts,
+        DropColumns,
+        FrequencyEncoder,
+        LogPower,
+        PairOps,
+        RollingLag,
+        TargetEncoderCV,
+    )
+
+    df = pd.DataFrame({
+        "num": [1.0, 50.0, 100.0, 500.0, 1000.0],
+        "cat": ["a", "b", "a", "b", "c"],
+        "date": ["2023-01-01", "2023-01-02", "2023-01-03", "2023-01-04", "2023-01-05"],
+        "target": [0, 1, 0, 1, 0],
+    })
+
+    # 1. ClipQuantiles with lower_quantile, upper_quantile, and unexpected kwargs
+    cq1 = ClipQuantiles(columns=["num"], lower_quantile=0.05, upper_quantile=0.95, extra_arg="ignored")
+    cq1.fit(df)
+    res1 = cq1.transform(df)
+    assert res1["num"].iloc[0] >= df["num"].quantile(0.05) - 1e-5
+    assert res1["num"].iloc[-1] <= df["num"].quantile(0.95) + 1e-5
+
+    # 2. ClipQuantiles with percentile values (e.g. 5, 95)
+    cq2 = ClipQuantiles(cols=["num"], lower_percentile=5, upper_percentile=95)
+    assert cq2.lower == 0.05
+    assert cq2.upper == 0.95
+
+    # 3. DropColumns with drop_cols / cols
+    dc = DropColumns(drop_cols=["cat"], unused_kwarg=123)
+    dc.fit(df)
+    assert "cat" not in dc.transform(df).columns
+
+    # 4. DateParts with date_cols
+    dp = DateParts(date_cols=["date"], unused=True)
+    dp.fit(df)
+    dp_out = dp.transform(df)
+    assert "date_month" in dp_out.columns
+
+    # 5. CyclicEncoder with cycle
+    ce = CyclicEncoder(features=["num"], cycle=12.0)
+    ce.fit(df)
+    ce_out = ce.transform(df)
+    assert "num_sin" in ce_out.columns
+
+    # 6. PairOps with operations
+    po = PairOps(col_pairs=[("num", "num")], operations=["diff"])
+    po.fit(df)
+    po_out = po.transform(df)
+    assert "num_diff_num" in po_out.columns
+
+    # 7. LogPower with func
+    lp = LogPower(cols=["num"], func="log1p")
+    lp.fit(df)
+    assert "num_log1p" in lp.transform(df).columns
+
+    # 8. FrequencyEncoder with cat_cols
+    fe = FrequencyEncoder(cat_cols=["cat"])
+    fe.fit(df)
+    assert "cat_freq" in fe.transform(df).columns
+
+    # 9. TargetEncoderCV with smooth
+    te = TargetEncoderCV(cols=["cat"], smooth=5.0)
+    te.fit(df, df["target"])
+    assert "cat_te" in te.transform(df).columns
+
+    # 10. RollingLag with windows and lag
+    rl = RollingLag(cols=["num"], lag=1, windows=2)
+    rl.fit(df)
+    assert "num_lag1" in rl.transform(df).columns
+
+
+
