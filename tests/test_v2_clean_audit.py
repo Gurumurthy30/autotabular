@@ -198,26 +198,6 @@ def test_model_registry_has_dataset_tools():
     assert path.name == "data.csv"
 
 
-def test_build_default_candidates_supports_list_and_dict():
-    """Verify _build_default_candidates handles both list of library names and dict of library flags."""
-    from app.agents.model import _build_default_candidates
-
-    # Test with list (from get_available_libs())
-    cands_list = _build_default_candidates("binary_classification", ["sklearn", "lightgbm", "xgboost"])
-    assert len(cands_list) >= 2
-    names = [name for name, _ in cands_list]
-    assert "HistGradientBoosting_tuned" in names
-    assert "RandomForest_100" in names
-
-    # Test with dict
-    cands_dict = _build_default_candidates("regression", {"sklearn": True, "lightgbm": True})
-    assert len(cands_dict) >= 2
-
-    # Test with empty list
-    cands_empty = _build_default_candidates("binary_classification", [])
-    assert len(cands_empty) >= 2
-
-
 def test_delete_project_purges_all_artifacts_and_mlflow():
     """Verify DELETE /projects/{project_id} cascades to DB, removes filesystem folder, and purges MLflow runs."""
     import sqlite3

@@ -100,6 +100,7 @@ class WorkerReport(BaseModel):
     suggestion: str | None = None
     notebook: dict[str, Any] = Field(default_factory=dict)
     artifacts: list[str] = Field(default_factory=list)
+    error_text: str | None = None
 
     @field_validator("result_summary", mode="before")
     @classmethod

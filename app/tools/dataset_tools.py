@@ -54,3 +54,28 @@ class DatasetTools:
         """Returns the first n rows as dictionaries."""
         df = self.load_dataset(version)
         return df.head(n).to_dict(orient="records")
+
+    def resolve_target_column(self, version: str, target: str) -> str:
+        """Resolves target column name case-insensitively against dataset headers.
+
+        Returns the exact matching column name from the dataset.
+        Raises ValueError if no case-insensitive match exists.
+        """
+        if not target or not str(target).strip():
+            raise ValueError("Target column must be specified and non-empty.")
+
+        path = self.get_dataset_path(version)
+        if path.suffix == ".parquet":
+            import pyarrow.parquet as pq
+            headers = pq.read_schema(path).names
+        else:
+            headers = pd.read_csv(path, nrows=0).columns.tolist()
+
+        mapping = {h.lower(): h for h in headers}
+        target_clean = str(target).strip()
+        if target_clean.lower() not in mapping:
+            raise ValueError(
+                f"Target column '{target_clean}' not found in dataset headers: {headers}. "
+                "Please verify the column name."
+            )
+        return mapping[target_clean.lower()]

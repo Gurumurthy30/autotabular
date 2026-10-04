@@ -87,6 +87,9 @@ def invoke_json(
         response = llm.invoke(messages)
         raw_text = str(getattr(response, "content", ""))
     except Exception as e:
+        from app.core.model_router import LLMRateLimitError
+        if isinstance(e, LLMRateLimitError):
+            raise
         err_msg = f"LLM invocation error: {e!s}"
         _log.error("[%s] %s", agent_name, err_msg)
         return None, err_msg, raw_text
@@ -128,6 +131,9 @@ def invoke_json(
         repair_resp = llm.invoke(repair_messages)
         repair_raw = str(getattr(repair_resp, "content", ""))
     except Exception as e:
+        from app.core.model_router import LLMRateLimitError
+        if isinstance(e, LLMRateLimitError):
+            raise
         repair_err = f"Repair LLM invocation error: {e!s}"
         _log.error("[%s] %s", agent_name, repair_err)
         return None, repair_err, repair_raw

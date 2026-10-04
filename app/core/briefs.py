@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 from app.config import PROJECTS_DIR
+from app.core.knowledge import KnowledgeBoard
 from app.core.run_memory import RunMemory
 from app.core.schemas import SupervisorDecision
 from app.core.state import ProjectState
@@ -289,10 +290,15 @@ def render_supervisor_context(
         lessons_str = "None recorded."
     sec_lessons = f"=== PROJECT LESSONS ===\n{lessons_str}"
 
+    kb = KnowledgeBoard(run_dir=mem.run_dir)
+    kb_digest = kb.digest("supervisor")
+    sec_kb = f"=== KNOWLEDGE BOARD ===\n{kb_digest}"
+
     sections = [
         sec_mission,
         sec_plan,
         sec_best,
+        sec_kb,
         sec_progress,
         sec_ledger,
         sec_notes,
@@ -421,10 +427,15 @@ def build_worker_brief(
         f"EDA Findings: projects/{project_id}/eda/findings.json",
         f"Feature Schema: projects/{project_id}/features/feature_schema.json",
         f"Best Version Meta: projects/{project_id}/runs/{run_id}/memory/best.json",
+        f"Knowledge Board: projects/{project_id}/runs/{run_id}/memory/knowledge.json",
     ]
     sec_e = "=== FILE POINTERS (Inspect on demand, never dump raw) ===\n" + "\n".join(file_pointers)
 
-    brief_text = "\n\n".join([sec_a, sec_b, sec_c, sec_d, sec_e])
+    kb = KnowledgeBoard(run_dir=mem.run_dir)
+    kb_digest = kb.digest(agent)
+    sec_kb = f"=== KNOWLEDGE BOARD ({agent.upper()}) ===\n{kb_digest}"
+
+    brief_text = "\n\n".join([sec_a, sec_b, sec_kb, sec_c, sec_d, sec_e])
 
     budget = (
         JUDGE_CONTEXT_LIMIT if agent in ("judge", "evaluator")

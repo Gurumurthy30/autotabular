@@ -1,139 +1,224 @@
-"""Scikit-Learn Modeling Agent with Paired CV and Noise Floor Evaluation (Phase 4.4)."""
+"""Scikit-Learn and Gradient Boosting Modeling Agent (Phase 2A).
 
+LLM plans candidate models and hyperparameters dynamically using KnowledgeBoard digest.
+Coder executes the candidates in one script via harness cv_evaluate using the current FE pipeline.
+"""
+
+import json
 import time
 from pathlib import Path
 from typing import Any
 
-import joblib
-import numpy as np
 import pandas as pd
-from sklearn.base import BaseEstimator, clone
-from sklearn.dummy import DummyClassifier, DummyRegressor
-from sklearn.ensemble import (
-    ExtraTreesClassifier,
-    ExtraTreesRegressor,
-    HistGradientBoostingClassifier,
-    HistGradientBoostingRegressor,
-    RandomForestClassifier,
-    RandomForestRegressor,
-)
-from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.pipeline import Pipeline
+from pydantic import BaseModel, Field
 
+from app.agents.coder import CoderSubAgent
 from app.agents.prompts import TASK_PLAYBOOKS
 from app.config import PROJECTS_DIR
 from app.core.briefs import WORKER_BRIEF_LIMIT, build_worker_brief, check_and_log_budget
+from app.core.knowledge import KnowledgeBoard
 from app.core.model_router import ModelRouter
 from app.core.run_memory import RunMemory
 from app.core.schemas import WorkerReport
 from app.core.state import ProjectState
-from app.ml_harness.contract import load_pipeline_from_script
-from app.ml_harness.cv import cv_evaluate, get_metric_direction
+from app.core.versions import update_best
+from app.ml_harness.cv import get_metric_direction
 from app.ml_harness.libs import get_available_libs
 from app.ml_harness.noise import is_significant_gain
 from app.ml_harness.paths import RunPaths
-from app.ml_harness.preprocess import make_basic_preprocessor
 from app.tools.registry import ToolRegistry
 from app.utils.logger import get_logger
 
 _log = get_logger(__name__)
 
 
-def _build_default_candidates(
-    task_type: str,
-    available_libs: list[str] | set[str] | dict[str, Any],
-    seed: int = 42,
-) -> list[tuple[str, BaseEstimator]]:
-    """Builds a diverse set of competitive model estimators based on available libraries."""
-    is_classification = "classification" in task_type
-    candidates: list[tuple[str, BaseEstimator]] = []
+class ModelExperimentItem(BaseModel):
+    """A proposed model candidate experiment."""
+    family: str = Field(description="Estimator class name, e.g. RandomForestClassifier, HistGradientBoostingClassifier, LogisticRegression, LGBMClassifier, XGBClassifier")
+    params_or_search_space: dict[str, Any] = Field(default_factory=dict, description="Hyperparameters or search space for the estimator")
+    reason: str = Field(default="", description="Why this candidate and hyperparameters were chosen based on EDA findings and prior results")
 
-    if isinstance(available_libs, dict):
-        libs_set = {k for k, v in available_libs.items() if v}
+
+class ModelExperimentPlan(BaseModel):
+    """Experiment plan containing candidate models to evaluate."""
+    plan: list[ModelExperimentItem] = Field(default_factory=list, description="List of proposed candidate models")
+
+
+def normalize_params(p: Any) -> str:
+    """Normalizes estimator parameter representation for consistent duplicate matching."""
+    if isinstance(p, dict):
+        return json.dumps(p, sort_keys=True)
+    if not p:
+        return "{}"
+    if isinstance(p, str):
+        try:
+            parsed = json.loads(p)
+            if isinstance(parsed, dict):
+                return json.dumps(parsed, sort_keys=True)
+        except Exception:
+            pass
+        return p.strip()
+    return str(p)
+
+
+def filter_duplicate_candidates(
+    plan: list[ModelExperimentItem],
+    models_tried: list[Any],
+) -> tuple[list[ModelExperimentItem], list[str]]:
+    """Rejects any plan item whose family + params already exist in models_tried (code check)."""
+    seen: set[tuple[str, str]] = set()
+    for m in models_tried:
+        family = (m.family if hasattr(m, "family") else m.get("family", "")).lower().strip()
+        params = m.params_summary if hasattr(m, "params_summary") else m.get("params_summary", "")
+        norm_params = normalize_params(params)
+        seen.add((family, norm_params))
+
+    kept: list[ModelExperimentItem] = []
+    rejected: list[str] = []
+    for item in plan:
+        f = item.family.lower().strip()
+        p = normalize_params(item.params_or_search_space)
+        if (f, p) in seen:
+            rejected.append(f"{item.family} with params {p}")
+        else:
+            kept.append(item)
+            seen.add((f, p))
+
+    return kept, rejected
+
+
+def parse_and_validate_plan(raw_text: str) -> list[ModelExperimentItem]:
+    """Parses and validates LLM experiment plan JSON with support for both list and wrapped dict formats."""
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    elif cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+    cleaned = cleaned.removesuffix("```").strip()
+
+    data = None
+    try:
+        data = json.loads(cleaned)
+    except Exception:
+        # Search for first '[' or '{'
+        idx_obj = cleaned.find("{")
+        idx_arr = cleaned.find("[")
+        if idx_obj == -1 and idx_arr == -1:
+            raise ValueError("No JSON object or array found in LLM response.")
+
+        if idx_arr != -1 and (idx_obj == -1 or idx_arr < idx_obj):
+            depth, in_str, escape = 0, False, False
+            for i in range(idx_arr, len(cleaned)):
+                ch = cleaned[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    if in_str:
+                        escape = True
+                    continue
+                if ch == '"':
+                    in_str = not in_str
+                    continue
+                if not in_str:
+                    if ch == "[":
+                        depth += 1
+                    elif ch == "]":
+                        depth -= 1
+                        if depth == 0:
+                            data = json.loads(cleaned[idx_arr : i + 1])
+                            break
+        else:
+            depth, in_str, escape = 0, False, False
+            for i in range(idx_obj, len(cleaned)):
+                ch = cleaned[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    if in_str:
+                        escape = True
+                    continue
+                if ch == '"':
+                    in_str = not in_str
+                    continue
+                if not in_str:
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            data = json.loads(cleaned[idx_obj : i + 1])
+                            break
+
+    if data is None:
+        raise ValueError("Could not parse balanced JSON from LLM response.")
+
+    items: list[ModelExperimentItem] = []
+    if isinstance(data, list):
+        items = [ModelExperimentItem.model_validate(x) for x in data]
+    elif isinstance(data, dict):
+        if "plan" in data and isinstance(data["plan"], list):
+            items = [ModelExperimentItem.model_validate(x) for x in data["plan"]]
+        elif "candidates" in data and isinstance(data["candidates"], list):
+            items = [ModelExperimentItem.model_validate(x) for x in data["candidates"]]
+        elif "family" in data:
+            items = [ModelExperimentItem.model_validate(data)]
+        else:
+            raise ValueError(f"JSON object missing 'plan' key. Keys found: {list(data.keys())}")
     else:
-        libs_set = set(available_libs) if available_libs else set()
+        raise ValueError(f"Expected JSON array or object, got: {type(data)}")
 
-    if is_classification:
-        candidates.append(("HistGradientBoosting_tuned", HistGradientBoostingClassifier(
-            max_iter=150, max_leaf_nodes=31, l2_regularization=0.1, random_state=seed
-        )))
-        candidates.append(("RandomForest_100", RandomForestClassifier(
-            n_estimators=100, max_depth=12, min_samples_split=5, random_state=seed, n_jobs=-1
-        )))
-        candidates.append(("ExtraTrees_100", ExtraTreesClassifier(
-            n_estimators=100, max_depth=12, min_samples_split=5, random_state=seed, n_jobs=-1
-        )))
+    if not items:
+        raise ValueError("Plan contains 0 candidates.")
+    return items
 
-        # LightGBM if installed
-        if "lightgbm" in libs_set:
-            try:
-                import lightgbm as lgb
-                candidates.append(("LightGBM", lgb.LGBMClassifier(
-                    n_estimators=150, learning_rate=0.05, num_leaves=31, random_state=seed, verbose=-1
-                )))
-            except Exception:
-                pass
 
-        # XGBoost if installed
-        if "xgboost" in libs_set:
-            try:
-                import xgboost as xgb
-                candidates.append(("XGBoost", xgb.XGBClassifier(
-                    n_estimators=150, max_depth=5, learning_rate=0.05, random_state=seed, eval_metric="logloss", verbosity=0
-                )))
-            except Exception:
-                pass
+def generate_experiment_plan(
+    llm: Any,
+    system_prompt: str,
+    user_prompt: str,
+) -> tuple[list[ModelExperimentItem] | None, str]:
+    """Generates and validates model experiment plan with exactly 1 repair retry on error."""
+    from langchain_core.messages import HumanMessage, SystemMessage
 
-        # CatBoost if installed
-        if "catboost" in libs_set:
-            try:
-                import catboost as cb
-                candidates.append(("CatBoost", cb.CatBoostClassifier(
-                    iterations=150, learning_rate=0.05, depth=5, random_seed=seed, verbose=0
-                )))
-            except Exception:
-                pass
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ]
 
-    else:
-        # Regression
-        candidates.append(("HistGradientBoosting_tuned", HistGradientBoostingRegressor(
-            max_iter=150, max_leaf_nodes=31, l2_regularization=0.1, random_state=seed
-        )))
-        candidates.append(("RandomForest_100", RandomForestRegressor(
-            n_estimators=100, max_depth=12, min_samples_split=5, random_state=seed, n_jobs=-1
-        )))
-        candidates.append(("ExtraTrees_100", ExtraTreesRegressor(
-            n_estimators=100, max_depth=12, min_samples_split=5, random_state=seed, n_jobs=-1
-        )))
+    # Attempt 1
+    try:
+        response = llm.invoke(messages)
+        raw_text = str(getattr(response, "content", ""))
+        items = parse_and_validate_plan(raw_text)
+        return items, ""
+    except Exception as err1:
+        from app.core.model_router import LLMRateLimitError
+        if isinstance(err1, LLMRateLimitError):
+            raise
+        first_err = str(err1)
+        _log.warning("[MODEL] Plan validation failed on attempt 1: %s. Retrying once with repair prompt.", first_err)
 
-        if "lightgbm" in libs_set:
-            try:
-                import lightgbm as lgb
-                candidates.append(("LightGBM", lgb.LGBMRegressor(
-                    n_estimators=150, learning_rate=0.05, num_leaves=31, random_state=seed, verbose=-1
-                )))
-            except Exception:
-                pass
-
-        if "xgboost" in libs_set:
-            try:
-                import xgboost as xgb
-                candidates.append(("XGBoost", xgb.XGBRegressor(
-                    n_estimators=150, max_depth=5, learning_rate=0.05, random_state=seed, verbosity=0
-                )))
-            except Exception:
-                pass
-
-        if "catboost" in libs_set:
-            try:
-                import catboost as cb
-                candidates.append(("CatBoost", cb.CatBoostRegressor(
-                    iterations=150, learning_rate=0.05, depth=5, random_seed=seed, verbose=0
-                )))
-            except Exception:
-                pass
-
-    return candidates
+    # Attempt 2: Repair retry
+    repair_prompt = (
+        f"Your previous response failed validation with error:\n{first_err}\n"
+        f"Fix the error and output ONLY valid JSON conforming to the schema:\n"
+        f'{{"plan": [{{"family": "EstimatorName", "params_or_search_space": {{...}}, "reason": "..."}}]}}'
+    )
+    messages.append(HumanMessage(content=repair_prompt))
+    try:
+        response = llm.invoke(messages)
+        raw_text = str(getattr(response, "content", ""))
+        items = parse_and_validate_plan(raw_text)
+        return items, ""
+    except Exception as err2:
+        from app.core.model_router import LLMRateLimitError
+        if isinstance(err2, LLMRateLimitError):
+            raise
+        final_err = f"Plan validation failed after repair retry: {err2}"
+        _log.error("[MODEL] %s", final_err)
+        return None, final_err
 
 
 def run_modeling(
@@ -156,13 +241,15 @@ def run_modeling(
     target_col = state.get("target_column")
     task_type = state.get("task_type")
     task_type_str = task_type.value if hasattr(task_type, "value") else str(task_type or "binary_classification")
-    target_metric = (state.get("target_metric") or ("roc_auc" if "binary" in task_type_str else ("f1" if "classification" in task_type_str else "rmse"))).lower()
+    from app.core.state import get_default_metric
+    target_metric = (state.get("target_metric") or get_default_metric(task_type)).lower()
     direction = get_metric_direction(target_metric)
 
     available_libs = get_available_libs()
-    playbook = TASK_PLAYBOOKS.get(task_type_str, "")
+    available_libs_list = sorted([k for k, v in available_libs.items() if v] if isinstance(available_libs, dict) else list(available_libs))
 
     mem = RunMemory(project_id, run_id)
+    kb = KnowledgeBoard(run_dir=mem.run_dir)
     run_paths = RunPaths(project_id, run_id)
     models_dir = PROJECTS_DIR / project_id / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -176,7 +263,7 @@ def run_modeling(
 
     check_and_log_budget("Model Brief", brief, WORKER_BRIEF_LIMIT)
 
-    # 1. Load dataset
+    # 1. Resolve dataset path
     dataset_version = state.get("dataset_version", "dataset_v1")
     dataset_path_str = state.get("split_train_path")
     if not dataset_path_str or not Path(dataset_path_str).exists():
@@ -224,13 +311,15 @@ def run_modeling(
             ).model_dump(),
         }
 
+    # Validate target column presence in headers
     try:
         if str(dataset_path).endswith(".parquet"):
-            df = pd.read_parquet(dataset_path)
+            import pyarrow.parquet as pq
+            headers = pq.read_schema(dataset_path).names
         else:
-            df = pd.read_csv(dataset_path)
+            headers = pd.read_csv(dataset_path, nrows=0).columns.tolist()
     except Exception as exc:
-        err_msg = f"Failed to load dataset: {exc}"
+        err_msg = f"Failed to inspect dataset headers: {exc}"
         _log.error("[MODEL] %s", err_msg)
         return {
             "status": "FAILED",
@@ -240,12 +329,12 @@ def run_modeling(
                 status="failed",
                 result_summary=err_msg[:300],
                 evidence={"error": err_msg},
-                notebook={"step": step, "tried": "Read data", "outcome": "failed", "lesson": str(exc)},
+                notebook={"step": step, "tried": "Read headers", "outcome": "failed", "lesson": str(exc)},
             ).model_dump(),
         }
 
-    if target_col not in df.columns:
-        err_msg = f"Target column '{target_col}' not found in dataset columns: {list(df.columns)}"
+    if target_col not in headers:
+        err_msg = f"Target column '{target_col}' not found in dataset headers: {headers}"
         _log.error("[MODEL] %s", err_msg)
         return {
             "status": "FAILED",
@@ -259,28 +348,7 @@ def run_modeling(
             ).model_dump(),
         }
 
-    X = df.drop(columns=[target_col], errors="ignore")
-    y = df[target_col]
-
-    # Convert binary classification string target to int if needed
-    if "binary" in task_type_str and y.dtype == object:
-        unique_vals = list(y.dropna().unique())
-        if len(unique_vals) == 2:
-            val_map = {unique_vals[0]: 0, unique_vals[1]: 1}
-            # Prefer common positive labels
-            if str(unique_vals[0]).lower() in ("yes", "true", "1", "positive"):
-                val_map = {unique_vals[0]: 1, unique_vals[1]: 0}
-            y = y.map(val_map)
-
-    # 2. Setup pipeline factory
-    pipeline_script = run_paths.feature_pipeline_py if run_paths.feature_pipeline_py.exists() else (PROJECTS_DIR / project_id / "features" / "feature_pipeline.py")
-    if pipeline_script.exists():
-        pipeline_factory = lambda: load_pipeline_from_script(pipeline_script)
-    else:
-        profile_data = state.get("profile_summary", {})
-        pipeline_factory = lambda: make_basic_preprocessor(profile_data)
-
-    # 3. Determine split strategy
+    # 2. Determine split strategy
     split_strategy = state.get("split_strategy")
     if not split_strategy:
         profile_dict = state.get("profile_summary", {})
@@ -291,336 +359,336 @@ def run_modeling(
         else:
             split_strategy = "kfold"
 
-    # 4. Mode execution: Baseline vs New/Tune
-    evaluated_results: list[dict[str, Any]] = []
+    # 3. STEP 1: LLM writes experiment plan as JSON [{family, params_or_search_space, reason}]
+    llm = router.get_model("model", temperature=0.2)
+    model_digest = kb.digest(role="model")
 
-    if mode == "baseline":
-        _log.info("[MODEL] Mode=baseline: deterministic evaluation of baseline model families.")
-        is_classification = "classification" in task_type_str
+    system_prompt = (
+        "You are an expert Tabular Machine Learning Modeler.\n"
+        "Your task is to propose an experiment plan with 2 to 3 candidate models to evaluate using cross-validation.\n"
+        f"Available libraries installed in the environment: {available_libs_list}.\n"
+        "RULES:\n"
+        f"1. You must ONLY choose model families from installed libraries: {available_libs_list}.\n"
+        "   Allowed examples: RandomForestClassifier, HistGradientBoostingClassifier, LogisticRegression, LGBMClassifier, XGBClassifier, CatBoostClassifier.\n"
+        "2. Do NOT propose estimators from packages that are not installed.\n"
+        "3. Incorporate relevant EDA findings, previous models tried, and judge advice from the context.\n"
+        "4. Output MUST be valid JSON with key 'plan':\n"
+        '{\n  "plan": [\n    {"family": "EstimatorClassName", "params_or_search_space": {"param1": val1}, "reason": "why chosen"}\n  ]\n}'
+    )
 
-        if is_classification:
-            baseline_candidates = [
-                ("DummyClassifier", DummyClassifier(strategy="prior")),
-                ("LogisticRegression", LogisticRegression(max_iter=1000, random_state=42)),
-                ("HistGradientBoosting", HistGradientBoostingClassifier(random_state=42)),
-            ]
-        else:
-            baseline_candidates = [
-                ("DummyRegressor", DummyRegressor(strategy="mean")),
-                ("Ridge", Ridge(random_state=42)),
-                ("HistGradientBoosting", HistGradientBoostingRegressor(random_state=42)),
-            ]
+    user_prompt = f"""Problem Context:
+- Project: {project_id} | Run: {run_id} | Step: {step}
+- Target column: '{target_col}'
+- Task type: {task_type_str}
+- Target metric: {target_metric} (direction: {direction})
+- Split strategy: {split_strategy}
+- Mode: {mode}
 
-        for cand_name, cand_est in baseline_candidates:
-            try:
-                cv_res = cv_evaluate(
-                    pipeline_factory=pipeline_factory,
-                    estimator=cand_est,
-                    X=X,
-                    y=y,
-                    task_type=task_type_str,
-                    metric=target_metric,
-                    split_strategy=split_strategy,
-                    seed=42,
-                )
-                evaluated_results.append({
-                    "name": cand_name,
-                    "estimator": cand_est,
-                    "cv_res": cv_res,
-                })
-                _log.info("[MODEL] Baseline %s | mean=%.4f std=%.4f gap=%.4f", cand_name, cv_res["cv_mean"], cv_res["cv_std"], cv_res["train_val_gap"])
-            except Exception as cv_exc:
-                _log.warning("[MODEL] Baseline candidate %s failed: %s", cand_name, cv_exc)
+Knowledge Board Digest:
+{model_digest}
 
-        if not evaluated_results:
-            err_msg = "All baseline model evaluations failed."
-            return {
-                "status": "FAILED",
-                "current_stage": "model",
-                "error": err_msg,
-                "report": WorkerReport(
-                    status="failed",
-                    result_summary=err_msg,
-                    evidence={"error": err_msg},
-                    notebook={"step": step, "tried": "Baselines", "outcome": "failed", "lesson": "All failed"},
-                ).model_dump(),
-            }
+Supervisor Brief:
+{brief}
 
-        # Select best baseline
-        if direction == "lower":
-            best_cand = min(evaluated_results, key=lambda x: x["cv_res"]["cv_mean"])
-        else:
-            best_cand = max(evaluated_results, key=lambda x: x["cv_res"]["cv_mean"])
+Propose 2-3 candidate models as a JSON object with 'plan': [{{"family": "...", "params_or_search_space": {{...}}, "reason": "..."}}].
+"""
 
-        best_name = best_cand["name"]
-        best_est = best_cand["estimator"]
-        best_res = best_cand["cv_res"]
-        best_score = best_res["cv_mean"]
-
-        # Fit full pipeline on all data
-        full_pipe = Pipeline([
-            ("features", pipeline_factory()),
-            ("model", clone(best_est)),
-        ])
-        full_pipe.fit(X, y)
-
-        # Save artifacts
-        joblib.dump(full_pipe, run_paths.best_model_pkl)
-        joblib.dump(full_pipe, models_dir / "best_model.pkl")
-
-        v1_dir = run_paths.version_dir("v1")
-        np.save(v1_dir / "oof.npy", best_res["oof_predictions"])
-        joblib.dump(full_pipe, v1_dir / "pipeline.pkl")
-
-        # Update run memory best
-        mem.set_best({
-            "version": "v1",
-            "score": best_score,
-            "mean": best_score,
-            "std": best_res["cv_std"],
-            "fold_scores": best_res["fold_scores"],
-            "metric": target_metric,
-            "model_name": best_name,
-            "train_score": best_res["train_score"],
-            "train_val_gap": best_res["train_val_gap"],
-        })
-
-        summary_lines = [f"{c['name']}: {c['cv_res']['cv_mean']:.4f}±{c['cv_res']['cv_std']:.4f}" for c in evaluated_results]
-        result_summary = f"Baseline complete. Best: {best_name} ({target_metric}={best_score:.4f}±{best_res['cv_std']:.4f}). [{', '.join(summary_lines)}]"
-
-        worker_report = WorkerReport(
-            status="ok",
-            result_summary=result_summary[:300],
-            evidence={
-                "best_model_name": best_name,
-                "score": best_score,
-                "mean": best_score,
-                "cv_mean": best_score,
-                "std": best_res["cv_std"],
-                "cv_std": best_res["cv_std"],
-                "noise_floor": None,
-                "significant": True,
-                "target_metric": target_metric,
-                "candidates_count": len(evaluated_results),
-            },
-            concern=None,
-            suggestion="Train advanced model candidates against baseline noise floor.",
-            notebook={
-                "step": step,
-                "tried": f"Baseline models ({len(evaluated_results)} candidates)",
-                "outcome": f"Best {best_name} {target_metric}={best_score:.4f}",
-                "lesson": "Baseline established. Folds cached for paired comparison.",
-                "score_impact": best_score,
-                "errors": [],
-            },
-            artifacts=[str(run_paths.best_model_pkl)],
-        )
-
+    plan_items, plan_err = generate_experiment_plan(llm, system_prompt, user_prompt)
+    if plan_err or not plan_items:
+        fail_err = f"Failed to generate valid model experiment plan: {plan_err}"
+        _log.error("[MODEL] %s", fail_err)
         return {
-            "model_summary": {
-                "validation_strategy": f"5-Fold CV ({split_strategy})",
-                "target_metric": target_metric,
-                "best_model_name": best_name,
-                "best_score": best_score,
-                "summary": result_summary,
-            },
-            "best_metric_value": best_score,
-            "baseline_score": best_score,
-            "current_version": "v1",
-            "best_version": "v1",
+            "status": "FAILED",
             "current_stage": "model",
-            "status": "SUCCESS",
-            "report": worker_report.model_dump(),
+            "error": fail_err,
+            "report": WorkerReport(
+                status="failed",
+                result_summary=fail_err[:300],
+                evidence={"error": fail_err},
+                notebook={"step": step, "tried": "Plan generation", "outcome": "failed", "lesson": fail_err},
+            ).model_dump(),
         }
 
+    _log.info("[MODEL] Generated experiment plan with %d items: %s", len(plan_items), [p.family for p in plan_items])
+
+    # 4. Reject duplicates against models_tried (code check)
+    valid_items, rejected = filter_duplicate_candidates(plan_items, kb.models_tried)
+    if rejected:
+        _log.info("[MODEL] Rejected %d duplicate candidates: %s", len(rejected), rejected)
+
+    if not valid_items:
+        err_msg = f"All planned candidates were duplicates of already evaluated models: {rejected}"
+        _log.warning("[MODEL] %s", err_msg)
+        return {
+            "status": "FAILED",
+            "current_stage": "model",
+            "error": err_msg,
+            "report": WorkerReport(
+                status="failed",
+                result_summary=err_msg[:300],
+                evidence={"error": err_msg, "rejected": rejected},
+                notebook={"step": step, "tried": "Duplicate check", "outcome": "failed", "lesson": err_msg},
+            ).model_dump(),
+        }
+
+    # 5. STEP 2: Coder runs the plan in ONE script using harness cv_evaluate with the FE pipeline
+    pipeline_script = run_paths.feature_pipeline_py if run_paths.feature_pipeline_py.exists() else (PROJECTS_DIR / project_id / "features" / "feature_pipeline.py")
+    pipeline_script_str = str(pipeline_script.resolve()).replace("\\", "/") if pipeline_script.exists() else ""
+    profile_data = state.get("profile_summary", {})
+
+    current_ver = state.get("current_version") or f"v{iteration}"
+    ver_dir = run_paths.version_dir(current_ver)
+    ver_dir.mkdir(parents=True, exist_ok=True)
+    eval_results_json = models_dir / f"eval_results_step_{step}.json"
+
+    candidates_spec = [item.model_dump() for item in valid_items]
+
+    coder_task = f"""Write and run a complete, self-contained Python script to train and evaluate {len(valid_items)} candidate model(s) using cv_evaluate.
+
+CANDIDATES TO EVALUATE:
+{json.dumps(candidates_spec, indent=2)}
+
+DATASET & TARGET:
+- Dataset path: r"{dataset_path_str}"
+- Target column: '{target_col}'
+- Task type: '{task_type_str}'
+- Target metric: '{target_metric}' (direction: '{direction}')
+- Split strategy: '{split_strategy}'
+
+FEATURE PIPELINE:
+{f'Pipeline script: r"{pipeline_script_str}"' if pipeline_script_str else 'No custom script; use make_basic_preprocessor'}
+
+EVALUATION HARNESS & IMPORTS:
+from pathlib import Path
+import json
+import numpy as np
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.base import clone
+from app.ml_harness.cv import cv_evaluate
+
+If pipeline script exists:
+    from app.ml_harness.contract import load_pipeline_from_script
+    pipeline_factory = lambda: load_pipeline_from_script(Path(r"{pipeline_script_str}"))
+Else:
+    from app.ml_harness.preprocess import make_basic_preprocessor
+    pipeline_factory = lambda: make_basic_preprocessor({json.dumps(profile_data)})
+
+CRITICAL SCRIPT STEPS:
+1. Load dataset from r"{dataset_path_str}" (handle .parquet or .csv).
+2. X = df.drop(columns=['{target_col}'], errors='ignore')
+   y = df['{target_col}']
+   If '{task_type_str}'.startswith('binary') and (y.dtype == object or y.dtype == bool or set(y.dropna().unique()) <= {{'0', '1', 'yes', 'no', 'true', 'false', 'True', 'False'}}):
+       unique_vals = list(y.dropna().unique())
+       if len(unique_vals) == 2:
+           val_map = {{unique_vals[0]: 0, unique_vals[1]: 1}}
+           if str(unique_vals[0]).lower() in ('yes', 'true', '1', 'positive'):
+               val_map = {{unique_vals[0]: 1, unique_vals[1]: 0}}
+           y = y.map(val_map).astype(int)
+
+3. For each candidate in CANDIDATES:
+   - Instantiate the estimator based on 'family' and 'params_or_search_space'. Always set random_state=42 (or random_seed=42 for CatBoost) if accepted.
+   - Run cv_evaluate:
+       res = cv_evaluate(
+           pipeline_factory=pipeline_factory,
+           estimator=est,
+           X=X,
+           y=y,
+           task_type='{task_type_str}',
+           metric='{target_metric}',
+           split_strategy='{split_strategy}',
+           seed=42,
+       )
+   - Store candidate evaluation metrics.
+
+4. Select the best candidate based on cv_mean ({'maximum' if direction == 'higher' else 'minimum'}).
+5. Fit the full pipeline on all data (X, y):
+   full_pipe = Pipeline([('features', pipeline_factory()), ('model', clone(best_est))])
+   full_pipe.fit(X, y)
+
+6. Save artifacts:
+   import joblib
+   joblib.dump(full_pipe, r"{run_paths.best_model_pkl}")
+   joblib.dump(full_pipe, r"{models_dir / 'best_model.pkl'}")
+   ver_p = Path(r"{ver_dir}")
+   ver_p.mkdir(parents=True, exist_ok=True)
+   joblib.dump(full_pipe, ver_p / "pipeline.pkl")
+   np.save(ver_p / "oof.npy", best_res["oof_predictions"])
+
+7. Save evaluation summary to JSON at r"{eval_results_json}":
+   with open(r"{eval_results_json}", "w", encoding="utf-8") as f:
+       json.dump({{
+           "candidates": evaluated_candidates,
+           "best_name": best_name,
+           "best_score": float(best_res["cv_mean"]),
+           "best_std": float(best_res["cv_std"]),
+           "best_fold_scores": [float(s) for s in best_res["fold_scores"]],
+           "best_train_score": float(best_res["train_score"]),
+           "best_train_val_gap": float(best_res["train_val_gap"]),
+           "best_params": best_params,
+       }}, f, indent=2)
+print("EVALUATION_COMPLETE")
+"""
+
+    coder = CoderSubAgent(project_id, router, coder_tools.files, coder_tools.execution)
+    coder_res = coder.run_task(
+        task_description=coder_task,
+        context={
+            "stage": "model",
+            "run_id": run_id,
+            "step": step,
+            "candidates_count": len(valid_items),
+        },
+    )
+
+    if not eval_results_json.exists():
+        err_msg = f"Coder failed to execute model experiment plan: {coder_res.get('error', 'eval_results.json was not created')}"
+        _log.error("[MODEL] %s", err_msg)
+        return {
+            "status": "FAILED",
+            "current_stage": "model",
+            "error": err_msg,
+            "report": WorkerReport(
+                status="failed",
+                result_summary=err_msg[:300],
+                evidence={"error": err_msg, "attempts": coder_res.get("attempts", 0)},
+                notebook={"step": step, "tried": "Model evaluation via Coder", "outcome": "failed", "lesson": err_msg},
+            ).model_dump(),
+        }
+
+    try:
+        with open(eval_results_json, "r", encoding="utf-8") as f:
+            eval_data = json.load(f)
+    except Exception as exc:
+        err_msg = f"Failed to parse evaluation results JSON: {exc}"
+        _log.error("[MODEL] %s", err_msg)
+        return {
+            "status": "FAILED",
+            "current_stage": "model",
+            "error": err_msg,
+            "report": WorkerReport(
+                status="failed",
+                result_summary=err_msg[:300],
+                evidence={"error": err_msg},
+                notebook={"step": step, "tried": "Parse results", "outcome": "failed", "lesson": str(exc)},
+            ).model_dump(),
+        }
+
+    evaluated_candidates = eval_data.get("candidates", [])
+    if not evaluated_candidates:
+        err_msg = "Model evaluation returned 0 evaluated candidates."
+        _log.error("[MODEL] %s", err_msg)
+        return {
+            "status": "FAILED",
+            "current_stage": "model",
+            "error": err_msg,
+            "report": WorkerReport(
+                status="failed",
+                result_summary=err_msg,
+                evidence={"error": err_msg},
+                notebook={"step": step, "tried": "Evaluate candidates", "outcome": "failed", "lesson": err_msg},
+            ).model_dump(),
+        }
+
+    best_name = eval_data["best_name"]
+    best_score = float(eval_data["best_score"])
+    best_std = float(eval_data["best_std"])
+    best_folds = [float(s) for s in eval_data.get("best_fold_scores", [])]
+    best_train_score = float(eval_data.get("best_train_score", 0.0))
+    best_train_val_gap = float(eval_data.get("best_train_val_gap", 0.0))
+    best_params = eval_data.get("best_params", {})
+
+    # 6. Log every evaluated candidate to KnowledgeBoard
+    for cand in evaluated_candidates:
+        c_name = cand.get("name", "model")
+        kb.add_model_tried({
+            "id": f"{c_name}_{step}_{int(time.time()*1000)%10000}",
+            "family": c_name,
+            "params_summary": json.dumps(cand.get("params", {}), sort_keys=True) if isinstance(cand.get("params"), dict) else str(cand.get("params", "")),
+            "cv_mean": float(cand.get("cv_mean", 0.0)),
+            "cv_std": float(cand.get("cv_std", 0.0)),
+            "train_score": float(cand.get("train_score", 0.0)) if cand.get("train_score") is not None else None,
+            "gap": float(cand.get("train_val_gap", 0.0)) if cand.get("train_val_gap") is not None else None,
+            "fit_time": None,
+            "outcome": "best" if c_name == best_name else "tested",
+        })
+
+    # 7. Significance comparison vs previous best
+    prev_best = mem.get_best() or {}
+    prev_best_scores = prev_best.get("fold_scores", [])
+    prev_best_score = prev_best.get("score")
+    prev_best_name = prev_best.get("model_name", "baseline")
+
+    if mode == "baseline" or prev_best_score is None or not prev_best_scores:
+        # Baseline run: fix C8 by NOT marking significant=True
+        is_sig = None
+        mean_diff = 0.0
+        nf = 0.0
+    elif len(prev_best_scores) == len(best_folds):
+        is_sig, mean_diff, nf = is_significant_gain(best_folds, prev_best_scores, direction=direction)
     else:
-        # Mode == "new" or "tune" or "add_candidates"
-        _log.info("[MODEL] Mode=%s: Evaluating competitive candidate models.", mode)
-        prev_best = mem.get_best() or {}
-        prev_best_scores = prev_best.get("fold_scores", [])
-        prev_best_score = prev_best.get("score") or prev_best.get("mean")
-        prev_best_name = prev_best.get("model_name", "baseline")
+        mean_diff = best_score - float(prev_best_score)
+        is_sig = (mean_diff > 0) if direction == "higher" else (mean_diff < 0)
+        nf = 0.0
 
-        # Propose competitive candidates
-        candidates = _build_default_candidates(task_type_str, available_libs, seed=42)
+    # 8. Update best version in versions.py (Fix C9: single writer)
+    if is_sig is not False:  # None (baseline) or True (significant improvement)
+        update_best(
+            project_id=project_id,
+            run_id=run_id,
+            version_id=current_ver,
+            score=best_score,
+            metric=target_metric,
+            step=step,
+            state=state,
+        )
 
-        for cand_name, cand_est in candidates:
-            try:
-                cv_res = cv_evaluate(
-                    pipeline_factory=pipeline_factory,
-                    estimator=cand_est,
-                    X=X,
-                    y=y,
-                    task_type=task_type_str,
-                    metric=target_metric,
-                    split_strategy=split_strategy,
-                    seed=42,
-                )
-                evaluated_results.append({
-                    "name": cand_name,
-                    "estimator": cand_est,
-                    "cv_res": cv_res,
-                })
-                _log.info("[MODEL] Candidate %s | mean=%.4f std=%.4f gap=%.4f", cand_name, cv_res["cv_mean"], cv_res["cv_std"], cv_res["train_val_gap"])
-            except Exception as cv_exc:
-                _log.warning("[MODEL] Candidate %s failed: %s", cand_name, cv_exc)
+    summary_lines = [f"{c.get('name', 'cand')}: {float(c.get('cv_mean', 0.0)):.4f}±{float(c.get('cv_std', 0.0)):.4f}" for c in evaluated_candidates]
+    result_summary = f"{mode.capitalize()} complete. Best: {best_name} ({target_metric}={best_score:.4f}±{best_std:.4f}). [{', '.join(summary_lines)}]"
 
-        if not evaluated_results:
-            err_msg = "Candidate model evaluations failed."
-            return {
-                "status": "FAILED",
-                "current_stage": "model",
-                "error": err_msg,
-                "report": WorkerReport(
-                    status="failed",
-                    result_summary=err_msg,
-                    evidence={"error": err_msg},
-                    notebook={"step": step, "tried": "Candidates", "outcome": "failed", "lesson": "All failed"},
-                ).model_dump(),
-            }
+    worker_report = WorkerReport(
+        status="ok" if (is_sig is not False) else "no_gain",
+        result_summary=result_summary[:300],
+        evidence={
+            "best_model_name": best_name,
+            "score": best_score,
+            "mean": best_score,
+            "cv_mean": best_score,
+            "std": best_std,
+            "cv_std": best_std,
+            "train_score": best_train_score,
+            "train_val_gap": best_train_val_gap,
+            "noise_floor": nf,
+            "significant": is_sig,
+            "delta": mean_diff,
+            "target_metric": target_metric,
+            "candidates_count": len(evaluated_candidates),
+        },
+        concern=None,
+        suggestion="Evaluate pipeline generalization with Judge." if (is_sig is not False) else "Consider domain-specific features in FE.",
+        notebook={
+            "step": step,
+            "tried": f"Candidates ({best_name})",
+            "outcome": f"Best {best_name} {target_metric}={best_score:.4f}",
+            "lesson": f"{'Baseline established' if mode == 'baseline' else ('Exceeded noise floor' if is_sig else 'Within noise floor')}",
+            "score_impact": best_score,
+            "errors": [],
+        },
+        artifacts=[str(run_paths.best_model_pkl)],
+    )
 
-        # Find best candidate in this run
-        if direction == "lower":
-            top_cand = min(evaluated_results, key=lambda x: x["cv_res"]["cv_mean"])
-        else:
-            top_cand = max(evaluated_results, key=lambda x: x["cv_res"]["cv_mean"])
-
-        top_name = top_cand["name"]
-        top_est = top_cand["estimator"]
-        top_res = top_cand["cv_res"]
-        top_scores = top_res["fold_scores"]
-        top_mean = top_res["cv_mean"]
-        top_std = top_res["cv_std"]
-
-        # Check significance vs previous best
-        if prev_best_scores and len(prev_best_scores) == len(top_scores):
-            is_sig, mean_diff, nf = is_significant_gain(top_scores, prev_best_scores, direction=direction)
-        else:
-            # No paired scores available: fall back to direct comparison
-            if prev_best_score is not None:
-                mean_diff = top_mean - prev_best_score
-                is_sig = (mean_diff > 0) if direction == "higher" else (mean_diff < 0)
-                nf = 0.0
-            else:
-                is_sig = True
-                mean_diff = 0.0
-                nf = 0.0
-
-        current_ver = state.get("current_version") or f"v{iteration}"
-
-        if is_sig:
-            _log.info("[MODEL] Significant improvement by %s: mean=%.4f vs prev=%.4f (nf=%.4f diff=%.4f)", top_name, top_mean, prev_best_score or 0.0, nf, mean_diff)
-            # Train full pipeline on all data
-            full_pipe = Pipeline([
-                ("features", pipeline_factory()),
-                ("model", clone(top_est)),
-            ])
-            full_pipe.fit(X, y)
-
-            joblib.dump(full_pipe, run_paths.best_model_pkl)
-            joblib.dump(full_pipe, models_dir / "best_model.pkl")
-
-            ver_dir = run_paths.version_dir(current_ver)
-            np.save(ver_dir / "oof.npy", top_res["oof_predictions"])
-            joblib.dump(full_pipe, ver_dir / "pipeline.pkl")
-
-            mem.set_best({
-                "version": current_ver,
-                "score": top_mean,
-                "mean": top_mean,
-                "std": top_std,
-                "fold_scores": top_scores,
-                "metric": target_metric,
-                "model_name": top_name,
-                "train_score": top_res["train_score"],
-                "train_val_gap": top_res["train_val_gap"],
-            })
-
-            res_summary = f"Significant improvement: {top_name} {target_metric}={top_mean:.4f}±{top_std:.4f} (diff {mean_diff:+.4f}, noise floor {nf:.4f} vs {prev_best_name})."
-            worker_report = WorkerReport(
-                status="ok",
-                result_summary=res_summary[:300],
-                evidence={
-                    "best_model_name": top_name,
-                    "score": top_mean,
-                    "mean": top_mean,
-                    "cv_mean": top_mean,
-                    "std": top_std,
-                    "cv_std": top_std,
-                    "noise_floor": nf,
-                    "significant": True,
-                    "delta": mean_diff,
-                    "target_metric": target_metric,
-                },
-                concern=None,
-                suggestion="Evaluate pipeline generalization with Judge.",
-                notebook={
-                    "step": step,
-                    "tried": f"Candidate models ({top_name})",
-                    "outcome": f"Gain verified: {top_mean:.4f} (delta {mean_diff:+.4f})",
-                    "lesson": f"Exceeded noise floor ({nf:.4f}). Promoted to best.",
-                    "score_impact": top_mean,
-                    "errors": [],
-                },
-                artifacts=[str(run_paths.best_model_pkl)],
-            )
-
-            return {
-                "model_summary": {
-                    "validation_strategy": f"5-Fold CV ({split_strategy})",
-                    "target_metric": target_metric,
-                    "best_model_name": top_name,
-                    "best_score": top_mean,
-                    "summary": res_summary,
-                },
-                "best_metric_value": top_mean,
-                "best_version": current_ver,
-                "current_stage": "model",
-                "status": "SUCCESS",
-                "report": worker_report.model_dump(),
-            }
-
-        else:
-            _log.info("[MODEL] No significant gain by %s (score=%.4f vs best=%.4f, nf=%.4f). Keeping %s.", top_name, top_mean, prev_best_score or 0.0, nf, prev_best_name)
-            res_summary = f"No significant gain: {top_name} scored {top_mean:.4f}±{top_std:.4f} (noise floor {nf:.4f}, diff {mean_diff:+.4f} vs {prev_best_name} {prev_best_score:.4f}). Retaining current best."
-            worker_report = WorkerReport(
-                status="no_gain",
-                result_summary=res_summary[:300],
-                evidence={
-                    "best_model_name": prev_best_name,
-                    "score": top_mean,
-                    "mean": top_mean,
-                    "cv_mean": top_mean,
-                    "std": top_std,
-                    "cv_std": top_std,
-                    "noise_floor": nf,
-                    "significant": False,
-                    "delta": mean_diff,
-                    "target_metric": target_metric,
-                },
-                concern=None,
-                suggestion="Consider domain-specific features in FE or transition to report if headroom is exhausted.",
-                notebook={
-                    "step": step,
-                    "tried": f"Candidate models ({top_name})",
-                    "outcome": f"No significant gain ({top_mean:.4f} within noise floor {nf:.4f})",
-                    "lesson": f"Candidate did not beat noise floor. Keeping {prev_best_name}.",
-                    "score_impact": top_mean,
-                    "errors": [],
-                },
-                artifacts=[],
-            )
-
-            return {
-                "model_summary": {
-                    "validation_strategy": f"5-Fold CV ({split_strategy})",
-                    "target_metric": target_metric,
-                    "best_model_name": prev_best_name,
-                    "best_score": prev_best_score,
-                    "summary": res_summary,
-                },
-                "best_metric_value": prev_best_score,
-                "current_stage": "model",
-                "status": "SUCCESS",
-                "report": worker_report.model_dump(),
-            }
+    return {
+        "model_summary": {
+            "validation_strategy": f"5-Fold CV ({split_strategy})",
+            "target_metric": target_metric,
+            "best_model_name": best_name,
+            "best_score": best_score,
+            "summary": result_summary,
+        },
+        "target_metric": target_metric,
+        "best_metric_value": best_score if (is_sig is not False) else prev_best_score,
+        "best_version": current_ver if (is_sig is not False) else state.get("best_version"),
+        "current_stage": "model",
+        "status": "SUCCESS",
+        "report": worker_report.model_dump(),
+    }

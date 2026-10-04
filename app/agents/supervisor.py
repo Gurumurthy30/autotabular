@@ -152,16 +152,45 @@ def supervisor_node(
             open_concern=open_concern,
         )
 
-        parsed_decision, err_msg, raw_text = invoke_json(
-            llm,
-            [
-                SystemMessage(content=SUPERVISOR_SYSTEM_PROMPT),
-                HumanMessage(content=context),
-            ],
-            SupervisorDecision,
-            agent_name="supervisor",
-        )
-        decision = parsed_decision
+        from app.core.model_router import LLMRateLimitError, circuit_breaker
+        if circuit_breaker.tripped:
+            _log.error("[SUPERVISOR] Circuit breaker is tripped. Aborting supervisor execution.")
+            return {
+                "status": "FAILED",
+                "error": f"LLM rate limited: {circuit_breaker.last_detail}",
+                "next_action": "finish",
+                "supervisor_decision": {
+                    "thought": "Circuit breaker tripped due to consecutive LLM rate limits.",
+                    "action": "finish",
+                    "reason": f"LLM rate limited: {circuit_breaker.last_detail}",
+                },
+            }
+
+        try:
+            parsed_decision, err_msg, raw_text = invoke_json(
+                llm,
+                [
+                    SystemMessage(content=SUPERVISOR_SYSTEM_PROMPT),
+                    HumanMessage(content=context),
+                ],
+                SupervisorDecision,
+                agent_name="supervisor",
+            )
+            decision = parsed_decision
+        except LLMRateLimitError as rle:
+            _log.error("[SUPERVISOR] LLMRateLimitError in supervisor: %s", rle)
+            if circuit_breaker.tripped:
+                return {
+                    "status": "FAILED",
+                    "error": f"LLM rate limited: {circuit_breaker.last_detail or rle}",
+                    "next_action": "finish",
+                    "supervisor_decision": {
+                        "thought": "Circuit breaker tripped due to consecutive LLM rate limits.",
+                        "action": "finish",
+                        "reason": f"LLM rate limited: {circuit_breaker.last_detail or rle}",
+                    },
+                }
+            raise
 
         if decision is None:
             # LLM parse failure after repair: use deterministic fallback

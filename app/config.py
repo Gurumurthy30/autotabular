@@ -22,6 +22,9 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:120b")
 # Context window size for the LLM (tokens) — passed to ChatOllama as num_ctx
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
 
+# Client timeout for LLM requests (seconds)
+LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "180"))
+
 # MLflow configuration
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
 

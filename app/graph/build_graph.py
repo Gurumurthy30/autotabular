@@ -2,6 +2,7 @@
 
 import hashlib
 import time
+import traceback
 from typing import Any, Literal
 
 from langgraph.graph import END, START, StateGraph
@@ -15,10 +16,11 @@ from app.agents.profile import profile_dataset
 from app.agents.report import run_report
 from app.agents.supervisor import supervisor_node
 from app.core.briefs import build_worker_brief
-from app.core.model_router import ModelRouter
+from app.core.knowledge import KnowledgeBoard
+from app.core.model_router import LLMRateLimitError, ModelRouter, circuit_breaker
 from app.core.run_memory import RunMemory
 from app.core.schemas import LedgerRow
-from app.core.state import ProjectState
+from app.core.state import ProjectState, get_default_metric
 from app.core.versions import restore_version, snapshot_version, update_best
 from app.tools.registry import ToolRegistry
 from app.utils.logger import get_logger
@@ -32,22 +34,42 @@ def make_worker_node(name: str, fn: Any, router: ModelRouter, registry: ToolRegi
         project_id = state["project_id"]
         run_id = state.get("run_id", "unknown")
         mem = RunMemory(project_id, run_id)
+        kb = KnowledgeBoard(run_dir=mem.run_dir)
         decision_dict = state.get("supervisor_decision") or {}
 
         # 1. Build targeted brief
         brief = build_worker_brief(name, decision_dict, mem, state)
+        canonical_key = "fe" if name == "features" else ("judge" if name == "evaluator" else name)
 
         # 2. Time worker execution
         t0 = time.monotonic()
-        if name == "profile":
-            res = fn(state, registry)
-        else:
-            res = fn(state, router, registry, brief=brief)
+        try:
+            if name == "profile":
+                res = fn(state, registry)
+            else:
+                res = fn(state, router, registry, brief=brief)
+        except Exception as exc:
+            tb = traceback.format_exc()
+            _log.error("[WORKER] Unhandled exception in %s:\n%s", name, tb)
+            err_text_1500 = tb[-1500:]
+            if isinstance(exc, LLMRateLimitError) or "rate limit" in str(exc).lower():
+                circuit_breaker.record_rate_limit(str(exc))
+            res = {
+                "status": "FAILED",
+                "error": f"{name} failed with unhandled exception: {exc}",
+                "error_text": err_text_1500,
+                "report": {
+                    "status": "failed",
+                    "result_summary": f"Unhandled error in {name}: {str(exc)[:200]}",
+                    "error_text": err_text_1500,
+                    "evidence": {"error": str(exc), "error_text": err_text_1500, "traceback": tb},
+                    "notebook": {"step": state.get("step", 0), "tried": name, "outcome": "failed", "lesson": str(exc)},
+                },
+            }
         duration_s = time.monotonic() - t0
 
         # 3. Update worker execution counts
         worker_runs = dict(state.get("worker_runs", {}))
-        canonical_key = "fe" if name == "features" else ("judge" if name == "evaluator" else name)
         worker_runs[canonical_key] = worker_runs.get(canonical_key, 0) + 1
 
         # 4. Extract WorkerReport
@@ -69,6 +91,10 @@ def make_worker_node(name: str, fn: Any, router: ModelRouter, registry: ToolRegi
             evidence = {}
             concern = None
             notebook_data = {"step": state.get("step", 0), "tried": name, "outcome": "ok", "lesson": "done"}
+
+        # Mark targeted judge advice addressed ONLY if worker succeeded
+        if status == "ok":
+            kb.mark_judge_advice_addressed(canonical_key)
 
         # 5. Concern deduplication: ignore concern whose normalized text hash was already raised
         open_concern = None
@@ -106,10 +132,10 @@ def make_worker_node(name: str, fn: Any, router: ModelRouter, registry: ToolRegi
         noise_floor_val = evidence.get("noise_floor")
         significant_val = evidence.get("significant")
 
-        error_text = None
-        if status != "ok":
+        error_text = raw_report.get("error_text")
+        if not error_text and status != "ok":
             err_raw = evidence.get("error") or res.get("error") or result_summary
-            error_text = str(err_raw)[-300:]
+            error_text = str(err_raw)[-1500:]
 
         decision_reason = str(decision_dict.get("reason", ""))[:300]
         brief_summary = str(decision_dict.get("brief", {}).get("objective", f"Execute {name}"))[:200]
@@ -154,19 +180,78 @@ def make_worker_node(name: str, fn: Any, router: ModelRouter, registry: ToolRegi
         if name == "model" and status == "ok" and score is not None:
             ver = current_ver or "v1"
             snapshot_version(project_id, run_id, ver, stage="model", meta=res.get("model_summary"))
-            metric = state.get("target_metric", "f1")
+            default_metric = get_default_metric(state.get("task_type"))
+            metric = state.get("target_metric") or res.get("target_metric") or (res.get("report", {}).get("evidence", {}) or {}).get("target_metric") or default_metric
             exp_id = res.get("best_experiment_id")
             improved = update_best(project_id, run_id, ver, score, metric, state.get("step", 0), state, experiment_id=exp_id)
             if improved:
                 res["best_metric_value"] = score
                 res["best_version"] = ver
 
+        # 9. Record worker outputs in KnowledgeBoard
+        if name == "eda" and status == "ok":
+            eda_findings = res.get("eda_findings") or state.get("eda_findings") or {}
+            for item in eda_findings.get("findings", []):
+                kb.add_eda_finding(item)
+
+        elif name in ("features", "fe") and status == "ok":
+            feat_summary = res.get("feature_summary") or {}
+            ver = feat_summary.get("version", current_ver or "v1")
+            for feat_name in feat_summary.get("kept_features", []):
+                kb.add_feature_tried({
+                    "id": str(feat_name),
+                    "version": ver,
+                    "description": str(feat_name),
+                    "source_cols": [str(feat_name)],
+                    "reason": "Engineered feature",
+                    "outcome": "kept",
+                })
+            for feat_name in feat_summary.get("removed_features", []):
+                kb.add_feature_tried({
+                    "id": str(feat_name),
+                    "version": ver,
+                    "description": str(feat_name),
+                    "source_cols": [str(feat_name)],
+                    "reason": "Pruned or leakage risk",
+                    "outcome": "dropped",
+                })
+
+        elif name == "model" and status == "ok":
+            mod_summary = res.get("model_summary") or {}
+            best_name = mod_summary.get("best_model_name") or evidence.get("best_model_name") or "model"
+            kb.add_model_tried({
+                "id": f"{best_name}_{state.get('step', 0)}",
+                "family": best_name,
+                "params_summary": mod_summary.get("summary", ""),
+                "cv_mean": score,
+                "cv_std": float(std_val) if std_val is not None else None,
+                "train_score": float(evidence.get("train_score")) if evidence.get("train_score") is not None else None,
+                "gap": float(evidence.get("train_val_gap")) if evidence.get("train_val_gap") is not None else None,
+                "fit_time": duration_s,
+                "outcome": "best" if (res.get("best_metric_value") == score or score is not None) else status,
+            })
+
+        elif name in ("judge", "evaluator"):
+            judge_rep = res.get("judge_report") or evidence
+            if isinstance(judge_rep, dict) and judge_rep.get("overall"):
+                kb.add_judge_verdict({
+                    "step": state.get("step", 0),
+                    "blame_stage": judge_rep.get("blame_stage", "none"),
+                    "overall": judge_rep.get("overall", "ship"),
+                    "advice": judge_rep.get("advice", []),
+                    "addressed": False,
+                })
+
         res["worker_runs"] = worker_runs
         if open_concern is not None:
             res["open_concern"] = open_concern
 
-        # Worker FAILED status does not end run, except profile
-        if name == "profile" and status == "failed":
+        # Worker FAILED status does not end run, except profile or tripped circuit breaker
+        if circuit_breaker.tripped:
+            res["status"] = "FAILED"
+            res["error"] = f"LLM rate limited: {circuit_breaker.last_detail}"
+            res["next_action"] = "finish"
+        elif name == "profile" and status == "failed":
             res["status"] = "FAILED"
             res["error"] = "Profile step failed: dataset could not be read or profiled."
         else:
@@ -187,9 +272,43 @@ def build_ml_graph(project_id: str, router: ModelRouter | None = None) -> StateG
 
     # 1. Define nodes
     def _supervisor(state: ProjectState):
+        if state.get("step", 0) == 0:
+            circuit_breaker.reset()
+        if circuit_breaker.tripped or state.get("status") == "FAILED" or str(state.get("error", "")).startswith("LLM rate limited"):
+            err = state.get("error") or f"LLM rate limited: {circuit_breaker.last_detail}"
+            return {"status": "FAILED", "error": err, "next_action": "finish"}
+
         _log.info("[SUPERVISOR] Turn step=%d current_stage='%s'", state.get("step", 0), state.get("current_stage"))
         result = supervisor_node(state, router, registry)
         _log.info("[SUPERVISOR] Chosen next action: '%s'", result.get("next_action"))
+        try:
+            mem = RunMemory(state["project_id"], state.get("run_id", "unknown"))
+            kb = KnowledgeBoard(run_dir=mem.run_dir)
+            decision_data = result.get("supervisor_decision") or {}
+            action = result.get("next_action") or decision_data.get("action", "")
+            reason = decision_data.get("reason", "")
+            kb.add_decision({
+                "step": state.get("step", 0),
+                "action": action,
+                "reason": reason,
+            })
+        except Exception as kb_exc:
+            _log.warning("[GRAPH] Failed to log supervisor decision to knowledge board: %s", kb_exc)
+        # Resolve target column case-insensitively on step 0 if dataset exists
+        target = state.get("target_column")
+        if state.get("step", 0) == 0 and target:
+            try:
+                from app.tools.dataset_tools import DatasetTools
+                d_tools = DatasetTools(state.get("project_id", project_id))
+                csv_p = d_tools.datasets_dir / state.get("dataset_version", "dataset_v1") / "data.csv"
+                parquet_p = d_tools.datasets_dir / state.get("dataset_version", "dataset_v1") / "data.parquet"
+                if csv_p.exists() or parquet_p.exists():
+                    resolved_target = d_tools.resolve_target_column(state.get("dataset_version", "dataset_v1"), target)
+                    result["target_column"] = resolved_target
+            except Exception as e:
+                _log.error("[GRAPH] Target column resolution failed: %s", e)
+                return {"status": "FAILED", "error": f"Target column resolution failed: {e}", "next_action": "finish"}
+
         return result
 
     _profile = make_worker_node("profile", profile_dataset, router, registry)
@@ -218,6 +337,8 @@ def build_ml_graph(project_id: str, router: ModelRouter | None = None) -> StateG
 
     # 3. Conditional routing from supervisor
     def route_supervisor(state: ProjectState) -> Literal["profile", "eda", "features", "model", "judge", "report", "__end__"]:
+        if circuit_breaker.tripped or state.get("status") == "FAILED" or str(state.get("error", "")).startswith("LLM rate limited"):
+            return END
         action = state.get("next_action")
         if action == "profile":
             return "profile"

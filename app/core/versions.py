@@ -81,8 +81,8 @@ def update_best(
     run_id: str,
     version_id: str,
     score: float,
-    metric: str,
-    step: int,
+    metric: str | None = None,
+    step: int = 0,
     state: dict[str, Any] | None = None,
     experiment_id: str | None = None,
 ) -> bool:
@@ -90,7 +90,10 @@ def update_best(
     mem = RunMemory(project_id, run_id)
     current_best = mem.get_best()
 
-    higher_is_better = is_higher_better(metric)
+    from app.core.state import get_default_metric
+    task_type = state.get("task_type") if state else None
+    metric_name = metric or (state.get("target_metric") if state else None) or get_default_metric(task_type)
+    higher_is_better = is_higher_better(metric_name)
 
     is_improved = False
     if current_best is None or "score" not in current_best or current_best["score"] is None:

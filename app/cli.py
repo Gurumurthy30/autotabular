@@ -36,6 +36,9 @@ def run(project_name: str, dataset: str, target: str, metric: str | None, descri
     dataset_dest = dataset_tools.register_dataset_from_file(dataset, version=version)
     print(f"Registered dataset to version '{version}' at: {dataset_dest}")
 
+    # Resolve target column case-insensitively against dataset headers
+    target = dataset_tools.resolve_target_column(version, target)
+
     # 2. Setup initial state
     run_id = f"run_{uuid.uuid4().hex[:8]}"
     initial_state: ProjectState = {

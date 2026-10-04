@@ -16,6 +16,22 @@ class TaskType(str, Enum):
     AMBIGUOUS = "ambiguous"
 
 
+def get_default_metric(task_type: TaskType | str | None) -> str:
+    """Returns the default evaluation metric for a given task type:
+    binary -> roc_auc, multiclass -> f1_macro, regression -> rmse.
+    """
+    if task_type is None:
+        return "roc_auc"
+    t_str = task_type.value if hasattr(task_type, "value") else str(task_type).lower()
+    if "binary" in t_str:
+        return "roc_auc"
+    if "multi" in t_str:
+        return "f1_macro"
+    if "regress" in t_str:
+        return "rmse"
+    return "roc_auc"
+
+
 class ProjectState(TypedDict, total=False):
     project_id: str
     run_id: str

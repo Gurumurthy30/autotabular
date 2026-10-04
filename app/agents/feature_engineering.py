@@ -261,6 +261,14 @@ MANDATORY CONTRACT RULES (The harness will verify these):
                     nan_cols = sample_out.columns[sample_out.isna().any()].tolist()
                     raise ValueError(f"Transformed output contains NaNs in columns: {nan_cols}")
 
+                # Check for unencoded object/string columns
+                non_num_cols = sample_out.select_dtypes(include=["object", "string"]).columns.tolist()
+                if non_num_cols:
+                    raise ValueError(
+                        f"Transformed output contains unencoded string/object columns: {non_num_cols}. "
+                        "All categorical features must be encoded (e.g. OneHotEncoder, OrdinalEncoder, frequency) or dropped."
+                    )
+
                 # Test pickle safety
                 test_pkl = features_dir / "test_pipe.pkl"
                 fresh_pipe = load_pipeline_from_script(temp_script)
