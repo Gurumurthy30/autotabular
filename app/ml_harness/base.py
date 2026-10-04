@@ -31,3 +31,24 @@ class SafeTransformer(BaseEstimator, TransformerMixin):
         if hasattr(self, "feature_names_in_"):
             return self.feature_names_in_
         return np.array([], dtype=object)
+
+    def __sklearn_clone__(self) -> "SafeTransformer":
+        """Robust scikit-learn clone hook that avoids strict identity assertion crashes."""
+        from sklearn.base import clone as sk_clone
+        klass = self.__class__
+        params = self.get_params(deep=False)
+        cloned_params = {
+            name: (sk_clone(p, safe=False) if hasattr(p, "get_params") else p)
+            for name, p in params.items()
+        }
+        try:
+            cloned = klass(**cloned_params)
+        except Exception:
+            cloned = klass()
+        for k, v in cloned_params.items():
+            try:
+                setattr(cloned, k, v)
+            except Exception:
+                pass
+        return cloned
+

@@ -79,7 +79,7 @@ METHOD:
 4. Few, high-value features. If the raw features are already near what simple models reach, say so and return the basic pipeline. Do not invent features to look busy.
 5. Do not drop a column because it is unique: datetime columns become date parts. Follow the column roles from the profile; the harness already handles true identifiers.
 MODES: basic = harness preprocessing only (imputation, encoding, date parts); new = full design; patch = open the previous feature_pipeline.py and change only what the brief names.
-CONTRACT (the harness enforces the rest): define make_feature_pipeline() returning an UNFITTED sklearn transformer. Use the classes in app.ml_harness.transformers and SafeTransformer for custom logic. Never fit on all data, never call train_test_split, never use lambdas.
+CONTRACT (the harness enforces the rest): define make_feature_pipeline() returning an UNFITTED sklearn transformer. Use the classes in app.ml_harness.transformers (DropColumns, DateParts, CyclicEncoder, PairOps, LogPower, ClipQuantiles, FrequencyEncoder, TargetEncoderCV, RollingLag) and SafeTransformer for custom logic. In __init__, assign parameters directly (self.p = p) without mutation so scikit-learn's clone() succeeds. Never fit on all data, never call train_test_split, never use lambdas.
 REPORT: each new feature with source columns, transformation and reason (finding id or hypothesis); new feature count vs raw count; anything the harness removed as duplicate. Then SKIPPED and NEXT."""
 
 MODEL_SYSTEM_PROMPT = SHARED_PRINCIPLES + """
@@ -124,5 +124,6 @@ CODER_SYSTEM_PROMPT = """You are a Python engineer writing one script for a data
 Rules:
 - Return ONE python code block, nothing else.
 - Use app.ml_harness for splitting, pipelines, cv and paths. Do not re-implement them.
+- In sklearn transformers, assign constructor parameters directly to self attributes without mutation (self.param = param) so scikit-learn clone() succeeds.
 - Print results in the exact format the task asks for.
 When your previous script failed you receive: your last code, the full error, the last output, and the error history. Read the error, find the real cause, and fix that cause. Never resend the same code. If the same error signature appears again after your change, change strategy: simplify, use a different library or method. If you conclude the task cannot be done in this environment, return a short plain-text explanation instead of code, and say what is missing."""

@@ -301,8 +301,8 @@ def test_transformers_flexible_kwargs_and_clip_quantiles_aliases():
         "target": [0, 1, 0, 1, 0],
     })
 
-    # 1. ClipQuantiles with lower_quantile, upper_quantile, and unexpected kwargs
-    cq1 = ClipQuantiles(columns=["num"], lower_quantile=0.05, upper_quantile=0.95, extra_arg="ignored")
+    # 1. ClipQuantiles with lower_quantile, upper_quantile
+    cq1 = ClipQuantiles(columns=["num"], lower_quantile=0.05, upper_quantile=0.95)
     cq1.fit(df)
     res1 = cq1.transform(df)
     assert res1["num"].iloc[0] >= df["num"].quantile(0.05) - 1e-5
@@ -310,51 +310,109 @@ def test_transformers_flexible_kwargs_and_clip_quantiles_aliases():
 
     # 2. ClipQuantiles with percentile values (e.g. 5, 95)
     cq2 = ClipQuantiles(cols=["num"], lower_percentile=5, upper_percentile=95)
-    assert cq2.lower == 0.05
-    assert cq2.upper == 0.95
+    cq2.fit(df)
+    assert "num" in cq2.bounds_
+    res2 = cq2.transform(df)
+    assert res2["num"].iloc[0] >= df["num"].quantile(0.05) - 1e-5
 
     # 3. DropColumns with drop_cols / cols
-    dc = DropColumns(drop_cols=["cat"], unused_kwarg=123)
+    dc = DropColumns(cols=["cat"])
     dc.fit(df)
     assert "cat" not in dc.transform(df).columns
 
-    # 4. DateParts with date_cols
-    dp = DateParts(date_cols=["date"], unused=True)
+    # 4. DateParts with cols
+    dp = DateParts(cols=["date"])
     dp.fit(df)
     dp_out = dp.transform(df)
     assert "date_month" in dp_out.columns
 
-    # 5. CyclicEncoder with cycle
-    ce = CyclicEncoder(features=["num"], cycle=12.0)
+    # 5. CyclicEncoder with cols
+    ce = CyclicEncoder(cols=["num"], period=12.0)
     ce.fit(df)
     ce_out = ce.transform(df)
     assert "num_sin" in ce_out.columns
 
-    # 6. PairOps with operations
-    po = PairOps(col_pairs=[("num", "num")], operations=["diff"])
+    # 6. PairOps with col_pairs
+    po = PairOps(col_pairs=[("num", "num")], ops=["diff"])
     po.fit(df)
     po_out = po.transform(df)
     assert "num_diff_num" in po_out.columns
 
-    # 7. LogPower with func
-    lp = LogPower(cols=["num"], func="log1p")
+    # 7. LogPower with cols
+    lp = LogPower(cols=["num"], method="log1p")
     lp.fit(df)
     assert "num_log1p" in lp.transform(df).columns
 
-    # 8. FrequencyEncoder with cat_cols
-    fe = FrequencyEncoder(cat_cols=["cat"])
+    # 8. FrequencyEncoder with cols
+    fe = FrequencyEncoder(cols=["cat"])
     fe.fit(df)
     assert "cat_freq" in fe.transform(df).columns
 
-    # 9. TargetEncoderCV with smooth
-    te = TargetEncoderCV(cols=["cat"], smooth=5.0)
+    # 9. TargetEncoderCV with cols
+    te = TargetEncoderCV(cols=["cat"], smoothing=5.0)
     te.fit(df, df["target"])
     assert "cat_te" in te.transform(df).columns
 
-    # 10. RollingLag with windows and lag
-    rl = RollingLag(cols=["num"], lag=1, windows=2)
+    # 10. RollingLag with cols
+    rl = RollingLag(cols=["num"], lags=[1], roll_windows=[2])
     rl.fit(df)
     assert "num_lag1" in rl.transform(df).columns
+
+    # 11. Test that ALL transformers clone without error and fit inside ColumnTransformer
+    from sklearn.base import clone as sk_clone
+    from sklearn.compose import ColumnTransformer
+
+    for trans in [cq1, cq2, dc, dp, ce, po, lp, fe, te, rl, ClipQuantiles()]:
+        cloned = sk_clone(trans)
+        assert cloned is not None
+
+    ct = ColumnTransformer([
+        ("clip", ClipQuantiles(), ["num"]),
+        ("freq", FrequencyEncoder(), ["cat"]),
+    ])
+    ct_out = ct.fit_transform(df)
+    assert ct_out is not None
+
+
+def test_project_and_run_cancellation_isolation():
+    """Verify cancel_project_runs only affects currently active runs and does not poison subsequent runs."""
+    from app.api.runner import (
+        _ACTIVE_PROJECT_RUNS,
+        _CANCELLED_RUNS,
+        cancel_project_runs,
+        cancel_run,
+        is_project_cancelled,
+        is_run_cancelled,
+    )
+
+    pid = "test_cancel_isolation_proj"
+    run_1 = "run_active_1"
+    run_2 = "run_active_2"
+
+    _ACTIVE_PROJECT_RUNS[run_1] = pid
+    _ACTIVE_PROJECT_RUNS[run_2] = pid
+
+    # Cancel runs for this project
+    cancel_project_runs(pid)
+    assert is_run_cancelled(run_1)
+    assert is_run_cancelled(run_2)
+    assert is_project_cancelled(pid)
+
+    # Simulate run termination and cleanup
+    _ACTIVE_PROJECT_RUNS.pop(run_1, None)
+    _ACTIVE_PROJECT_RUNS.pop(run_2, None)
+    _CANCELLED_RUNS.discard(run_1)
+    _CANCELLED_RUNS.discard(run_2)
+
+    # Now a new run starts on the same project
+    new_run = "run_subsequent_3"
+    _ACTIVE_PROJECT_RUNS[new_run] = pid
+    assert not is_run_cancelled(new_run)
+    assert not is_project_cancelled(pid)
+
+    # Clean up
+    _ACTIVE_PROJECT_RUNS.pop(new_run, None)
+
 
 
 

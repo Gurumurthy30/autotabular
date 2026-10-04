@@ -23,7 +23,7 @@ from app.utils.logger import get_logger
 _log = get_logger(__name__)
 
 _CANCELLED_RUNS: set[str] = set()
-_CANCELLED_PROJECTS: set[str] = set()
+_ACTIVE_PROJECT_RUNS: dict[str, str] = {}  # run_id -> project_id
 
 
 def cancel_run(run_id: str) -> None:
@@ -31,7 +31,9 @@ def cancel_run(run_id: str) -> None:
 
 
 def cancel_project_runs(project_id: str) -> None:
-    _CANCELLED_PROJECTS.add(project_id)
+    for rid, pid in list(_ACTIVE_PROJECT_RUNS.items()):
+        if pid == project_id:
+            _CANCELLED_RUNS.add(rid)
 
 
 def is_run_cancelled(run_id: str) -> bool:
@@ -39,35 +41,38 @@ def is_run_cancelled(run_id: str) -> bool:
 
 
 def is_project_cancelled(project_id: str) -> bool:
-    return project_id in _CANCELLED_PROJECTS
+    active = [rid for rid, pid in _ACTIVE_PROJECT_RUNS.items() if pid == project_id]
+    return bool(active and all(rid in _CANCELLED_RUNS for rid in active))
 
 
 def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, target_column: str | None, target_metric: str | None, constraints: dict | None = None) -> None:
     """Executes the workflow graph synchronously and emits structured events throughout."""
     start_time = datetime.now(UTC)
+    _CANCELLED_RUNS.discard(run_id)
+    _ACTIVE_PROJECT_RUNS[run_id] = project_id
     _log.info(
         "[RUNNER] Workflow started | project=%s run=%s dataset=%s target=%s metric=%s",
         project_id, run_id, dataset_version, target_column, target_metric,
     )
 
-    # 1. Update run to RUNNING
-    with Session(engine) as session:
-        run_record = session.get(WorkflowRun, run_id)
-        if run_record:
-            run_record.status = "RUNNING"
-            session.add(run_record)
-            session.commit()
-
-    event_manager.emit_event(
-        project_id=project_id,
-        run_id=run_id,
-        event_type="WORKFLOW_STARTED",
-        stage="init",
-        message=f"Starting autonomous workflow run '{run_id}' for project '{project_id}'.",
-        data={"dataset_version": dataset_version, "target_column": target_column, "target_metric": target_metric},
-    )
-
     try:
+        # 1. Update run to RUNNING
+        with Session(engine) as session:
+            run_record = session.get(WorkflowRun, run_id)
+            if run_record:
+                run_record.status = "RUNNING"
+                session.add(run_record)
+                session.commit()
+
+        event_manager.emit_event(
+            project_id=project_id,
+            run_id=run_id,
+            event_type="WORKFLOW_STARTED",
+            stage="init",
+            message=f"Starting autonomous workflow run '{run_id}' for project '{project_id}'.",
+            data={"dataset_version": dataset_version, "target_column": target_column, "target_metric": target_metric},
+        )
+
         # Check dataset file
         d_tools = DatasetTools(project_id)
         try:
@@ -473,6 +478,9 @@ def execute_workflow_sync(project_id: str, run_id: str, dataset_version: str, ta
 
         if is_interrupted:
             raise exc
+    finally:
+        _ACTIVE_PROJECT_RUNS.pop(run_id, None)
+        _CANCELLED_RUNS.discard(run_id)
 
 
 async def execute_workflow_async(project_id: str, run_id: str, dataset_version: str, target_column: str | None, target_metric: str | None, constraints: dict | None = None) -> None:
