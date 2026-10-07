@@ -25,53 +25,8 @@ ENV/
 .env.local
 !.env.example
 
-# Frontend & Node
-node_modules/
-dist/
-.vite/
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
-*.tsbuildinfo
-.oxlintcache
-
-# MLflow
-mlruns/
-mlflow.db
-mlflow.db*
-
-# App Database & SQLite
-*.db
-*.db*
-*.sqlite
-*.sqlite3
-app_metadata.db*
-
-# Generated project data (keep directory structure, exclude generated contents)
-projects/*/
-!projects/.gitkeep
-
-# Testing & coverage
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-coverage.xml
-
-# IDE & OS
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-
-# Logs & runtime events
-*.log
-logs/
-*.events.jsonl
-
-# documents
-docs/audit_raw/
-
-.ruff_cache/
-scratch_diag/
-scratch_user_prompt.txt
+# other things
+ML_AGENT_PLAN.md
+AUDIT.md
+notebook/
+sample_data/

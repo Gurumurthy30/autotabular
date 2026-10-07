@@ -1,0 +1,121 @@
+"""Experimenter: ONE hypothesis, ONE change. Coder writes + runs the script on the fixed folds.
+Sees only: strategy, the current queue item, docs for the libraries it needs (digest rule)."""
+
+from __future__ import annotations
+
+import math
+import traceback
+from pathlib import Path
+
+from .. import ui
+from ..executor import parse_result, tail
+from ..ledger import (RARE_LIBS, Workspace, best_run, compact, digest, latest_ok_run, load,
+                      minutes_elapsed, session)
+from ..llm import RateLimitError
+from ..state import Run
+from . import docs
+from .coder import write_and_run
+
+
+def _libs_in(text: str) -> list[str]:
+    t = text.lower()
+    return [l for l in RARE_LIBS if l in t] + [l for l in ("sklearn", "pandas") if l in t]
+
+
+def _base_code(L, base: str | None) -> tuple[str | None, str | None]:
+    run = best_run(L) if base == "best" else (latest_ok_run(L, base) if base else None)
+    if run and run.script_path and Path(run.script_path).exists():
+        return run.exp_id, Path(run.script_path).read_text()
+    return None, None
+
+
+def run(ws: Workspace, exp_id: str) -> str | None:
+    """Returns None on success, or the error text (crash = Run with error, never a CV attempt)."""
+    try:
+        return _run(ws, exp_id)
+    except RateLimitError:
+        raise
+    except Exception as e:                                           # noqa: BLE001 — agent bug != run loop death
+        err = f"internal error: {type(e).__name__}: {e}"
+        (ws.logs / "errors.log").open("a").write(f"[experimenter {exp_id}]\n{traceback.format_exc()}\n")
+        with session(ws) as L:
+            L.runs.append(Run(exp_id=exp_id, error=err, seed=L.env.seed))
+            for q in L.queue:
+                if q.id == exp_id:
+                    q.status = "failed"
+        ui.error(f"{exp_id}: {err}")
+        return err
+
+
+def _run(ws: Workspace, exp_id: str) -> str | None:
+    with session(ws) as L:
+        item = next(q for q in L.queue if q.id == exp_id)
+        item.status = "running"
+    L = load(ws)
+    ui.say("Experimenter", f"{exp_id} [{item.kind}] {item.change}")
+
+    base_id, base_code = _base_code(L, item.base)
+    libs = _libs_in(item.change + item.hypothesis + str(item.params) + (base_code or ""))
+    docs.ensure(ws, libs)
+    L = load(ws)
+    retry = any(r.exp_id == exp_id and r.error for r in L.runs)     # crashed before -> Docs may have written sheets
+    sheets = {l: v for l, v in L.docs.items() if retry or l in libs}
+
+    task = (f"Experiment {exp_id}.\nHypothesis: {item.hypothesis}\nThe ONE change to make: {item.change}\n"
+            f"Params hint: {item.params}\n")
+    if item.params and item.params.get("downgrade"):
+        task += f"DOWNGRADE LEVEL {item.params['downgrade']} — previous attempt ran out of memory.\n"
+    task += (f"Start from this working script (from {base_id}). Apply ONLY the change above, keep everything "
+             f"else identical, and set EXP_ID = \"{exp_id}\":\n```python\n{base_code}```\n" if base_code
+             else "Write a fresh script following the skeleton.\n")
+    context = compact(digest(L, "experimenter"), 3500)
+    if sheets:
+        context += "\n\nLIBRARY CHEAT SHEETS (verified against the installed versions):\n" + "\n".join(
+            f"## {k}\n{v}" for k, v in sheets.items())
+
+    b = L.env.budget
+    timeout = int(max(120, min(900, (b.max_minutes - minutes_elapsed(L)) * 60)))
+    path, res = write_and_run(ws, exp_id, task, context, "experiment", timeout)
+
+    result = parse_result(res.stdout) if res.ok else None
+    err = None
+    if not res.ok:
+        err = tail(res.stderr or res.stdout, 1800)
+    elif not result or not isinstance(result.get("cv_mean"), (int, float)) or not math.isfinite(result["cv_mean"]):
+        err = "script finished but printed no valid RESULT_JSON line (did it call run_cv?)\n" + tail(res.stdout, 400)
+
+    run_ = Run(exp_id=exp_id, seconds=round(res.seconds, 1), seed=L.env.seed, script_path=str(path), error=err)
+    if not err:
+        run_ = run_.model_copy(update={k: result.get(k) for k in
+                                       ("cv_mean", "cv_std", "holdout", "oof_path", "test_pred_path", "artifact")})
+    with session(ws) as L:
+        L.runs.append(run_)
+        for q in L.queue:
+            if q.id == exp_id:
+                q.status = "failed" if err else "done"
+    if err:
+        ui.warn(f"{exp_id} crashed: {err.strip().splitlines()[-1][:140]}")
+    else:
+        ho = f"  holdout={run_.holdout:.4f}" if run_.holdout is not None else ""
+        ui.say("Experimenter", f"{exp_id} cv={run_.cv_mean:.4f} ± {run_.cv_std:.4f}{ho}  ({run_.seconds:.0f}s)")
+    return err
+
+
+def run_batch(ws: Workspace, batch: list[str], workers: int = 1) -> dict[str, str | None]:
+    """Runs a batch of experiments, concurrently if workers > 1."""
+    if not batch:
+        return {}
+    if workers <= 1 or len(batch) <= 1:
+        return {exp_id: run(ws, exp_id) for exp_id in batch}
+    import concurrent.futures
+    results: dict[str, str | None] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(batch))) as ex:
+        futures = {ex.submit(run, ws, exp_id): exp_id for exp_id in batch}
+        for fut in concurrent.futures.as_completed(futures):
+            exp_id = futures[fut]
+            try:
+                results[exp_id] = fut.result()
+            except Exception as e:
+                results[exp_id] = str(e)
+    return results
+

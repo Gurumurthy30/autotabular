@@ -1,32 +1,23 @@
-[project]
-name = "ml-agent"
-version = "0.1.0"
-description = "Autonomous Agentic Tabular ML Engineering Platform"
-readme = "README.md"
-requires-python = ">=3.11"
-dependencies = [
-    "langchain>=0.3.0",
-    "langgraph>=0.2.0",
-    "langchain-ollama>=0.2.0",
-    "pydantic>=2.7.0",
-    "pandas>=2.0.0",
-    "numpy>=1.24.0",
-    "pyarrow>=14.0.0",
-    "scikit-learn>=1.4.0",
-    "mlflow>=2.12.0",
-    "python-dotenv>=1.0.0",
-    "click>=8.1.0",
-    "sqlalchemy>=2.0.0",
-    "sqlmodel>=0.0.14",
-    "fastapi>=0.110.0",
-    "uvicorn>=0.28.0",
-    "cloudpickle>=3.0.0",
-]
-
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-[tool.pytest.ini_options]
-pythonpath = ["."]
+[project]
+name = "mlagent"
+version = "0.1.0"
+description = "CLI multi-agent ML engineer (LangGraph + one local/remote LLM)"
+requires-python = ">=3.10"
+dependencies = ["langgraph>=0.2", "pydantic>=2", "pandas", "numpy", "scikit-learn", "rich", "ollama", "pyyaml"]
 
+[project.optional-dependencies]
+boost = ["lightgbm", "xgboost", "catboost", "optuna"]
+dev = ["pytest", "optuna", "lightgbm"]
+
+[project.scripts]
+mlagent = "mlagent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mlagent*"]
+
+[tool.setuptools.package-data]
+mlagent = ["prompts/*.md"]
