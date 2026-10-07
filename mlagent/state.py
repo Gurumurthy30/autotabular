@@ -9,9 +9,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-TaskType = Literal["binary", "multiclass", "regression"]
+TaskType = Literal["binary", "multiclass", "multilabel", "regression", "ordinal", "other"]
 Direction = Literal["maximize", "minimize"]
-CVKind = Literal["kfold", "stratified", "group", "time"]
+CVKind = Literal["kfold", "stratified", "group", "stratified_group", "time"]
 ExpKind = Literal["feature", "model", "tune"]
 ExpStatus = Literal["pending", "running", "done", "failed"]
 QueueSource = Literal["strategist", "analyzer"]
@@ -65,6 +65,9 @@ class Profile(Base):
     missing: dict[str, float] = Field(default_factory=dict)     # col -> fraction missing
     leakage_flags: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    modality: list[str] = Field(default_factory=list)           # tabular|text|image|audio|timeseries|graph|video|other
+    task_form: str | None = None                                # e.g. "binary classification, probabilities expected"
+    data_files: list[dict[str, Any]] = Field(default_factory=list)  # path, kind, items, links_to_train_by, notes
 
 
 # ---- strategy (Strategist) -------------------------------------------------

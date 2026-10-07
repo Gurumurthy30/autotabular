@@ -14,15 +14,28 @@ from . import docs
 from .coder import write_and_run
 
 PROMPT_TASK = """\
-Create a TUNED version of the experiment script below (exp <<base>>, cv=<<cv>>).
-Keep the features and the model family identical; only search hyperparameters with Optuna:
-- optuna.create_study(direction="<<direction>>", sampler=optuna.samplers.TPESampler(seed=SEED))
-- study.optimize(objective, n_trials=<<trials>>, timeout=<<secs>>)
-- objective(trial): build params from trial.suggest_*, return run_cv("<<eid>>", fit_predict_with(params), X, y, final=False)["cv_mean"]
-  (final=False is fast and saves nothing; make fit_predict take the params and still guard X_te=None.)
-- After the search: refit once with study.best_params and call run_cv("<<eid>>", ..., X, y, X_test, final=True).
-Search-space guidance: learning rates log-uniform (0.01-0.3); tree depth/leaves and min-child/min-samples ranges that match the data size; always include a regularisation knob (L1/L2, subsample, colsample, min_child_weight); keep n_estimators moderate with early stopping carved from X_tr. Do not widen the space so far that trials exceed the time limit.
-Set EXP_ID = "<<eid>>". Script to tune:
+Create a complete, runnable TUNED version of the experiment script below (exp <<base>>, cv=<<cv>>).
+Keep features, preprocessing, and model family identical; search at most 4-6 high-impact hyperparameters with Optuna.
+
+Contract & Requirements:
+- Reply with exactly ONE ```python block and nothing else.
+- Add `import optuna` and silence verbose logs: `optuna.logging.set_verbosity(optuna.logging.WARNING)`.
+- Narrow, centred ranges: centre each range on the value already used in the script.
+  * learning_rate: log-uniform (e.g. 0.01 to 0.2)
+  * depth / leaves / min_child_samples: moderate integers around current values
+  * regularisation: L1/L2 (reg_alpha, reg_lambda) log-uniform, subsample / colsample
+  * Never tune seed, thread counts, or fixed fold definitions.
+- Set up study:
+  `study = optuna.create_study(direction="<<direction>>", sampler=optuna.samplers.TPESampler(seed=SEED))`
+  `study.optimize(objective, n_trials=<<trials>>, timeout=<<secs>>)`
+- `objective(trial)`: build params dict with trial.suggest_*, return `run_cv("<<eid>>", make_fit_predict(params), X, y, final=False)["cv_mean"]`.
+  (final=False is fast and saves nothing; ensure make_fit_predict still handles X_te=None safely).
+- CRITICAL FINAL STEP: After `study.optimize(...)`, refit using `study.best_params` and call:
+  `run_cv("<<eid>>", make_fit_predict(study.best_params), X, y, X_test, final=True)`
+  This final call at module top-level saves the artifacts and prints the mandatory RESULT_JSON line.
+- Set EXP_ID = "<<eid>>".
+
+Script to tune:
 ```python
 <<code>>
 ```\
@@ -32,14 +45,23 @@ PROMPTS = {
     "task": PROMPT_TASK,
 }
 
-TASK = """Create a TUNED version of the experiment script below (exp {base}, cv={cv:.4f}).
-Keep features and model family identical; only search hyperparameters with Optuna:
-- optuna.create_study(direction="{direction}", sampler=optuna.samplers.TPESampler(seed=SEED))
-- study.optimize(objective, n_trials={trials}, timeout={secs})
-- objective(trial): build params from trial.suggest_*, return run_cv("{eid}", fit_predict_with(params), X, y, final=False)["cv_mean"]
-  (final=False is fast and saves nothing; make fit_predict take the params).
-- After the search: refit once with study.best_params and call run_cv("{eid}", ..., X, y, X_test, final=True).
-Set EXP_ID = "{eid}". Script to tune:
+TASK = """Create a complete, runnable TUNED version of the experiment script below (exp {base}, cv={cv:.4f}).
+Keep features, preprocessing, and model family identical; search at most 4-6 high-impact hyperparameters with Optuna.
+
+Contract & Requirements:
+- Reply with exactly ONE ```python block and nothing else.
+- Add `import optuna` and silence verbose logs: `optuna.logging.set_verbosity(optuna.logging.WARNING)`.
+- Narrow, centred ranges around current values (learning_rate log-uniform, leaves/depth, L1/L2, subsampling). Never tune seed.
+- Set up study:
+  `study = optuna.create_study(direction="{direction}", sampler=optuna.samplers.TPESampler(seed=SEED))`
+  `study.optimize(objective, n_trials={trials}, timeout={secs})`
+- `objective(trial)`: return `run_cv("{eid}", make_fit_predict(params), X, y, final=False)["cv_mean"]`.
+- CRITICAL FINAL STEP: After `study.optimize(...)`, refit with `study.best_params` and call:
+  `run_cv("{eid}", make_fit_predict(study.best_params), X, y, X_test, final=True)`
+  This prints the mandatory RESULT_JSON line for the runner.
+- Set EXP_ID = "{eid}".
+
+Script to tune:
 ```python
 {code}
 ```"""

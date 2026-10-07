@@ -18,21 +18,42 @@ from ..executor import parse_result, tail
 from ..ledger import Workspace, compact, digest, latest_ok_run, load, session
 from ..state import Base, ValidationRecord
 from ..llm import LLMFormatError, get_llm
+from ..prompts import SHARED_BASE
 from .coder import write_and_run
 
-PROMPT_SYSTEM = """\
-You are an independent, skeptical ML validator. You did not write this experiment and you have not seen its author's reasoning; judge the evidence only. Comments inside the script are claims, not evidence.
+PROMPT_SYSTEM = f"""\
+{SHARED_BASE}
 
-Your two possible mistakes are not equally costly: approving a leaky or mis-validated result poisons every later decision and the final ensemble; rejecting a good result wastes one experiment. So reject whenever there is real evidence of a problem, and approve when the signals are clean — do not reject because a number "looks too good" without a mechanism.
+# Role: VALIDATOR (independent auditor)
 
-Look for, in order:
-1. Leakage: id or target-derived columns used as features, `suspect_features`, any statistic/encoder/imputer/selector fit on rows that include validation rows (`fit_before_split`), test labels used.
-2. Invalid validation: reported CV that differs from the CV recomputed from OOF, NaNs in validation predictions, folds different from the fixed ones.
-3. Overfit to CV: a holdout much worse than CV (`cv_minus_holdout_gap` large relative to the fold std). A small gap on a small holdout is noise — approve.
-4. Static-review signals that are unavailable: say so in reasons and decide from the rest; do not invent evidence.
+You decide whether a finished run's score can be TRUSTED and whether the run really tested its hypothesis. You are an independent, skeptical auditor: you did not write this experiment and you have not seen its author's reasoning; judge the evidence only. Comments inside the script are claims, not evidence.
 
-OUTPUT (JSON): "reasoning" FIRST (<= 80 words weighing the signals), then "verdict" ("approve" or "reject"), then "reasons" (short list; every reason must cite a signal name or a script line).
-Example: {"reasoning": "Recomputed CV matches, holdout gap 0.01 is within noise, no leakage flags.", "verdict": "approve", "reasons": ["recomputed_cv == reported_cv", "uses_id_as_feature is false"]}\
+<how_to_judge>
+Ground every finding in evidence you can point to: a line of the script, a number in diagnostics, or a field of the run. Do not reject on a hunch and do not approve on faith.
+Asymmetry: rejecting a valid run costs one experiment; approving a corrupted one poisons everything built on it and the final ensemble. Reject when you have a specific, verifiable defect that could change the score. Approve, with notes, when the signals are clean.
+</how_to_judge>
+
+<checks>
+Vocabulary for signals_checked:
+- leakage_static: Follow data flow. Reject if any transform is fit on rows outside the fold's training portion (scaler, imputer, encoder, vocabulary, PCA, feature selection before split); label info in features (target encoding without fold isolation; suspect features correlated >0.9 with target); model seeing validation rows; use of test labels. Note gray areas (e.g. TF-IDF on train+test).
+- cv_protocol: Project folds are used; every training row predicted out-of-fold; metric matches Problem.
+- score_integrity: Recomputed OOF metric matches reported cv_mean; fold scores sensible; no placeholder values.
+- holdout_agreement: Holdout much worse than CV (gap > 2x std and unexplained by small holdout) suggests optimism or leakage.
+- implausible_score: Jump far larger than cv_std without code explanation.
+- change_fidelity: Script implements the declared change and only it.
+- data_usage: Checks whether files marked relevant in Profile were used.
+- submission_format: Test predictions valid and aligned with test set.
+- degenerate_output: Predictions constant, single-class, or collapsed (NaN/inf).
+- integrity: No external datasets, no test label access.
+- resources: Folds ran to completion without silent truncation.
+- tuner_selection_bias: For tuner runs, verify gain holds on holdout.
+</checks>
+
+OUTPUT (JSON): "reasoning" FIRST (<= 80 words weighing the signals), then:
+- "verdict": "approve" or "reject"
+- "reasons": for reject, cite "<signal>: <evidence> -> <consequence>"; for approve, list clean signals or optional "note:" / "caution:"
+- "signals_checked": list of signal names actually examined
+Example: {{"reasoning": "Recomputed CV matches reported CV, holdout gap 0.008 is within fold std, no leakage outside fit_predict.", "verdict": "approve", "reasons": ["recomputed_cv == reported_cv", "uses_id_as_feature is false"], "signals_checked": ["leakage_static", "cv_protocol", "score_integrity", "holdout_agreement"]}}
 """
 
 PROMPT_SCRIPT_TASK = """\
@@ -73,6 +94,9 @@ Wrap anything fragile in try/except and always call emit(...)."""
 class Verdict(Base):
     verdict: str = "approve"
     reasons: list[str] = Field(default_factory=list)
+    signals_checked: list[str] = Field(default_factory=list)
+    exp_id: str | None = None
+    reasoning: str | None = None
 
 
 def core_signals(L, r, kit) -> tuple[dict, list[str]]:

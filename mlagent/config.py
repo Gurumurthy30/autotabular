@@ -68,22 +68,22 @@ CLI_MAP = {"model": "model.tag", "workers": "parallel.workers", "max_experiments
 TEMPLATE = """\
 # mlagent configuration (precedence: this file < env vars < CLI flags)
 model:
-  tag: gemma4:31b          # exact Ollama tag; env MLAGENT_MODEL overrides
+  tag: gemma4:31b-cloud          # exact Ollama tag; env MLAGENT_MODEL overrides
   host: null               # env OLLAMA_HOST overrides; API key only via env OLLAMA_API_KEY
   temperature: 0.2
 seed: 42
 target_score: null         # stop early once the best CV reaches this (else read from the goal text)
 budget:
-  max_experiments: 15
-  max_minutes: 120
-  plateau_n: 3             # approved runs without a counted gain
-  analyze_every: 3         # K: Analyzer every K runs
+  max_experiments: 24      # ~2 min per experiment fits in the 51 min loop
+  max_minutes: 60          # reduced from 120; raise to 90 for large datasets
+  plateau_n: 4             # approved runs without a counted gain (a bit more patience)
+  analyze_every: 4         # K: Analyzer every K runs (fewer LLM calls, more time for training)
   tune_top_n: 3
-  tune_trials: 20
+  tune_trials: 30          # enough for a decent Optuna-style search on the top models
   max_consecutive_crashes: 3
-  loop_fraction: 0.85      # experiment loop stops at this share of max_minutes
+  loop_fraction: 0.85      # loop ends at ~51 min; ~9 min left for tuning + finisher
 parallel:
-  workers: 1               # >1 runs a batch of experiments concurrently
+  workers: 1               # set 2 if you have 4+ CPU cores or a spare GPU
 docs:
   web: true                # official docs (allowlisted domains) when local introspection is not enough
   web_timeout: 15

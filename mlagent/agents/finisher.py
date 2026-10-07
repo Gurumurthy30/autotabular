@@ -12,7 +12,6 @@ from .. import ensemble, ui
 from ..ledger import Workspace, approved_runs, best_run, load, ok_runs, run_rows, session, verdicts
 from ..llm import RateLimitError, get_llm
 from ..state import FinalResult
-from ..ensemble import evaluate, choose, predict
 
 PROMPT_SUMMARY_SYSTEM = (
     "You write a 5-sentence executive summary of an ML run for a data scientist: "
@@ -76,6 +75,11 @@ def _report(ws: Workspace, L, fin: FinalResult, summary: str) -> None:
              f"- ensemble: {fin.ensemble}", f"- submission: {fin.submission_path}", f"- checks: {fin.checks}", ""]
     if summary:
         lines += ["## Summary", summary, ""]
+    if L.strategy:
+        val = L.strategy.validation
+        lines += ["## Validation Protocol",
+                  f"- Scheme: **{val.kind}** (n_splits={val.n_splits}, group={val.group_col}, time={val.time_col})",
+                  f"- Seed: **{L.env.seed}**   · Folds file: `{L.strategy.folds_path}`", ""]
     lines += ["## Runs", "| exp | src | cv | std | holdout | verdict |", "|---|---|---|---|---|---|"]
     q = {x.id: x.change for x in L.queue}
     for r in L.runs:
@@ -87,6 +91,10 @@ def _report(ws: Workspace, L, fin: FinalResult, summary: str) -> None:
     if L.strategy:
         lines += ["", "## Risks noted"] + [f"- {x}" for x in L.strategy.risks]
         lines += ["", "## Recalled domain approaches (UNVERIFIED)"] + [f"- {x}" for x in L.strategy.domain_notes]
+    lines += ["", "## Artifacts and Reproduction",
+              f"- Workspace: `{ws.root}`",
+              f"- Artifacts: `{ws.artifacts}`",
+              f"- Submission: `{fin.submission_path}`", ""]
     ws.report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

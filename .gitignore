@@ -12,6 +12,7 @@ wheels/
 *.egg
 .installed.cfg
 .Python
+.pytest_cache/
 
 # Virtual environments
 .venv/
@@ -30,3 +31,5 @@ ML_AGENT_PLAN.md
 AUDIT.md
 notebook/
 sample_data/
+mlagent_prompt_pack.md
+output_summary.csv

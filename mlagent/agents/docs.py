@@ -24,19 +24,22 @@ RARE_OBJECTS = {
 }
 
 PROMPT_QUERY_SYSTEM = (
-    "An ML script failed with a library-usage error. From the traceback and the script tail, identify "
+    "An ML script failed with a library-usage API error. From the traceback and script tail, identify "
     "(a) the Python library at fault and (b) the dotted paths of the objects whose signature/docstring would "
     "settle the question (e.g. lightgbm.LGBMClassifier.fit). Prefer the exact class or function in the failing line "
     "over the whole module. Fields: library (string), objects (list of dotted paths, at most 5)."
 )
 
 PROMPT_SHEET_SYSTEM = (
-    "You write a cheat sheet (max 25 lines, plain text) for a coder who just hit this error with this INSTALLED "
-    "library version. Use ONLY facts present in the inspected signatures/docstrings (keys without a prefix) or in web "
-    "text (keys starting with 'web:'). The local inspection describes the installed version and wins on any conflict; "
-    "web pages may describe another version. Begin with a line 'FIX:' that says what the error means and the correct "
-    "call. Then: correct import, constructor/fit keyword arguments, arguments that were removed or renamed, and one "
-    "minimal usage example. No speculation; if the evidence does not settle something, write 'unknown'."
+    "You are the DOCS agent writing a short, VERIFIED cheat sheet for a coder who just hit an API error "
+    "with this INSTALLED library version. Use ONLY facts from inspected signatures/docstrings or verified docs text. "
+    "The local inspection describes the installed version and wins on any conflict.\n\n"
+    "Rules (250 words or fewer):\n"
+    "1. Begin with a line 'FIX:' stating what caused the error and the exact replacement.\n"
+    "2. Include: installed version, correct signature, arguments that were removed/renamed/moved, and the replacement.\n"
+    "3. One minimal working snippet (<= 10 lines).\n"
+    "4. Note any dtype, shape, device, or callback traps relevant to this error.\n"
+    "5. No tutorials; mark any unconfirmed statement as '(unverified)'."
 )
 
 PROMPTS = {

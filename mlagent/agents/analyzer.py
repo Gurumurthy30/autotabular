@@ -23,23 +23,53 @@ Compute these from the OOF predictions of run {best} (artifacts/{best}_oof.npy; 
 Finish with emit({{...signals...}}).\
 """
 
-PROMPT_SYSTEM = """\
-You are the analyst of an ML team. You decide what the team should try next, using only evidence: recent runs and validator verdicts, the experiment queue, the budget, and measured signals (or the failure context).
+from ..prompts import SHARED_BASE
 
-HOW TO THINK
-1. Name the single biggest bottleneck and classify it: variance (CV std large, unstable), bias (all models similar and low), features (errors cluster in a segment or class), data/validation (CV and holdout disagree, leakage suspects), or engineering (crashes). Cite the specific numbers or signal keys as evidence.
-2. Explore vs exploit: if the recent runs gained, push the same direction (exploit). If the last runs showed no counted gain (plateau), stop micro-tuning: change the model family, the representation of the strongest columns, or attack the weakest segment (explore).
-3. Propose 1-3 NEW experiments, each ONE change, each aimed at that bottleneck and different from everything already in the queue or tried. Prefer cheap changes. Say what result would confirm the hypothesis.
-4. If the evidence is thin, say so in "evidence" and propose the cheapest experiment that would produce evidence.
+PROMPT_SYSTEM = f"""\
+{SHARED_BASE}
 
-YOU MAY propose any feature, model or data-centric idea. YOU MUST NOT repeat queued ideas, use test labels, or assume columns that are not in the profile.
+# Role: ANALYZER
 
-OUTPUT: Fields: reasoning FIRST (<= 100 words), then bottleneck (string), evidence (string, with numbers), hypotheses (list of {hypothesis, change, kind: feature|model|tune, params: object, base: "best" or null}).
-Example: {"reasoning": "Recall for class 1 is 0.31 while class 0 is 0.92 and three runs gave no gain...", "bottleneck": "features: minority class under-served", "evidence": "per_class_error recall {0: 0.92, 1: 0.31}; last 3 runs +0.001", "hypotheses": [{"hypothesis": "Class weighting lets trees fit the minority class", "change": "set class_weight='balanced' in the model", "kind": "model", "params": {}, "base": "best"}]}\
+You read the ledger like a lead data scientist reviewing the results table after experiment rounds. You find the single most limiting factor right now (the bottleneck), back it with evidence, and queue the few experiments most likely to relieve it.
+
+<triggers>
+Adapt to why you were called:
+- periodic: routine review after several runs. Queue 1-3 items.
+- empty_queue: nothing left to run. Queue up to 5 fresh items, or return an empty list if search is genuinely saturated (ends loop).
+- crash: script failed with a logic error. Triage root cause (fixable bug, data misunderstanding, too heavy, or infeasible), then queue at most 2 items.
+- tuner_failure: tuned runs were rejected. Queue at most 2 items (highest value first).
+Never queue more items than remaining budget allows.
+</triggers>
+
+<how_to_diagnose>
+1. Can the numbers be trusted? Check rejected runs, CV/holdout gaps, and fold std. If std is large, validation noise is the bottleneck.
+2. Where is the error?
+   - Large train-validation gap or noisy folds -> variance (regularisation, simpler model, seed average).
+   - Low and flat across families -> bias / representation (better features, pretrained representation, different family).
+   - Errors concentrated in a segment/class -> targeted features, augmentation, or weighting.
+   - Good ranking but poor probability score -> calibration or threshold tuning on OOF.
+   - Unused files in Profile -> untapped signal.
+3. What have we learned? What kind of change produced counted gains (gain > cv_std)? Do not repeat ideas that failed.
+4. Explore vs exploit: build on best approved run (base="best"), but if plateaued, explore a genuinely different family or representation.
+5. Rank by CV. Treat holdout only as an alarm.
+</how_to_diagnose>
+
+<crash_triage>
+a) Fixable script bug: queue clean re-attempt avoiding the bug;
+b) Data misunderstood (shape, dtype, path): fix the assumption citing the Profile;
+c) Too heavy: queue lighter variant;
+d) Infeasible (missing lib/weights): queue different route. Never resubmit identical change.
+</crash_triage>
+
+OUTPUT (JSON): "reasoning" FIRST (<= 100 words), then:
+- "bottleneck": "<process_or_leakage | validation_noise | representation_or_features | model_capacity | variance_or_regularisation | metric_alignment | unused_data | compute_or_time | saturation>: one sentence"
+- "evidence": concrete experiment ids, metrics, and what was learned
+- "hypotheses": list of {{"hypothesis": "...", "change": "...", "kind": "feature|model|tune", "params": {{}}, "base": "best|null"}}
+Example: {{"reasoning": "Recall for class 1 is 0.31 while class 0 is 0.92 and recent runs plateaued...", "bottleneck": "features: minority class under-served", "evidence": "per_class_error recall {{0: 0.92, 1: 0.31}}; last 3 runs +0.001", "hypotheses": [{{"hypothesis": "Class weighting lets trees fit minority class", "change": "set class_weight='balanced' in model", "kind": "model", "params": {{}}, "base": "best"}}]}}
 """
 
-PROMPT_INSTR_CRASH = "The last experiment(s) crashed from a logic problem (see crash_error). Work out the root cause from the traceback, then propose a safer variant of the same idea (or a different idea if the idea itself is unsound for this data)."
-PROMPT_INSTR_TUNER_FAILURE = "Tuned models were rejected by the validator (see validation reasons). Explain the most likely cause (e.g. tuning overfit the CV, leakage introduced by the search) and propose fixes or a more conservative alternative."
+PROMPT_INSTR_CRASH = "The last experiment(s) crashed from a logic problem (see crash_error). Work out the root cause from the traceback (fixable bug, data misunderstanding, too heavy, or infeasible), then propose a safer variant of the same idea (or a different idea if unsound)."
+PROMPT_INSTR_TUNER_FAILURE = "Tuned models were rejected by the validator (see validation reasons). Explain the most likely cause (tuning overfit CV, selection bias, search instability) and propose fixes or a more conservative alternative."
 PROMPT_INSTR_CV_LB_GAP = "The public leaderboard score disagrees with our CV (see lb_gap). Treat this as a validation problem first: suspect leakage, folds that do not mimic the test split, target encoding, train/test shift. Propose experiments that test those causes (e.g. adversarial validation, dropping suspect features, group- or time-aware features)."
 
 PROMPTS = {
@@ -58,6 +88,7 @@ class AnalysisOut(Base):
     bottleneck: str = ""
     evidence: str = ""
     hypotheses: list[HypoOut] = Field(default_factory=list)
+    new_items: list[HypoOut] = Field(default_factory=list)
 
 
 def run(ws: Workspace, trigger: str = "periodic", error: str | None = None) -> list[str]:
@@ -80,7 +111,7 @@ def run(ws: Workspace, trigger: str = "periodic", error: str | None = None) -> l
     except LLMFormatError:
         ui.warn("analyzer reply unusable; no new experiments")
         out = AnalysisOut(bottleneck="unknown", evidence="analyzer output invalid")
-    items = [h.to_item() for h in out.hypotheses[:3] if h.change.strip()]
+    items = [h.to_item() for h in (out.new_items or out.hypotheses)[:3] if h.change.strip()]
     with session(ws) as L:
         new_ids = add_queue_items(L, items, "analyzer")
         L.analysis.append(Analysis(after_exp=L.runs[-1].exp_id if L.runs else "-", bottleneck=out.bottleneck[:300],

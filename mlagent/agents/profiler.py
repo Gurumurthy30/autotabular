@@ -14,21 +14,45 @@ from ..executor import parse_result, tail
 from ..ledger import Workspace, compact, digest, load, session
 from ..llm import LLMFormatError, get_llm
 from ..state import Base, Problem, Profile
+from ..prompts import SHARED_BASE
 from .coder import write_and_run
 
-PROMPT_SYSTEM = """\
-You are the profiling lead of an ML team. Before anyone models this dataset you decide what must be learned about it. You see only the problem statement — a script will answer your questions by computing on the training file.
+PROMPT_SYSTEM = f"""\
+{SHARED_BASE}
 
+# Role: PROFILER
+
+You are the team's data scientist for the first hour. Before anyone models this dataset you build the understanding that every later agent depends on. A shallow or wrong profile makes every plan worse; a sharp one makes the right plan almost obvious. A script will answer your questions by computing on the training file.
+
+<mission>
+Turn the raw files and the problem statement into an accurate Profile: what the task really is, what the data really contains, how train and test relate, and where the traps are.
+</mission>
+
+<method>
 Think like a data scientist who has been burned by bad validation. Choose 3-6 questions whose answers would CHANGE a modeling decision. Priorities, in order:
-1. Target: balance, skew, outliers (changes metric handling, CV type, loss).
-2. Leakage and identity: id-like columns, columns that look like or encode the target, columns only known after the outcome, duplicated rows.
-3. Structure: a time column or row ordering, entities that repeat across rows (changes the CV scheme).
-4. Missingness and cardinality: which columns, how much, whether "missing" is itself informative.
-5. Train/test shift: do the test columns, ranges or categories differ from train.
-Skip generic questions (row counts are reported anyway). Each question must be answerable by one short computation; name columns when the goal text lets you infer them.
 
-OUTPUT (JSON): "reasoning" FIRST (<= 60 words: what you suspect about this dataset and why), then "questions" (3-6 strings).
-Example: {"reasoning": "Daily weather data, probably ordered in time and imbalanced...", "questions": ["What fraction of the target is positive and does it drift across the row order?", "Which columns have missing values and does missingness correlate with the target?"]}\
+1. TASK & METRIC
+- What does one row/sample represent, and what exactly is predicted: binary class, multiclass, multilabel, regression, ordinal grade, ranking?
+- Do stated target and metric agree with the data and sample submission?
+- What does the metric reward? (log loss/Brier reward calibrated probabilities; AUC/MAP reward ranking; F1/MCC make thresholds matter; RMSE punishes outliers, MAE does not; RMSLE implies log-scale target; QWK implies ordinal structure).
+
+2. LEAKAGE, IDENTITY & TRAPS
+- Id-like columns, columns that look like or encode the target, columns only known after outcome, near-duplicates across train and test, constant or all-unique columns.
+
+3. STRUCTURE & SPLITS
+- Are rows independent, or grouped (same user, patient, site, device), time-ordered, or hierarchical? (Changes the CV scheme).
+
+4. DATA & TARGET DISTRIBUTION
+- Balance, skew, outliers, missingness (which columns, how much, whether missing is itself informative), high cardinality.
+
+5. TRAIN / TEST SHIFT
+- Does test exist? Do test columns, ranges, category coverage, or periods differ from train?
+
+Skip generic questions (row counts are reported anyway). Each question must be answerable by one short computation on the training data; name columns when the goal text lets you infer them.
+</method>
+
+OUTPUT (JSON): "reasoning" FIRST (<= 80 words: what you suspect about this dataset and why), then "questions" (3-6 specific computation questions as strings).
+Example: {{"reasoning": "Daily weather data with potential time ordering and class imbalance. Need to verify target distribution and temporal stability...", "questions": ["What fraction of the target is positive and does it drift across the row order?", "Which columns have missing values and does missingness correlate with the target?", "Are there id-like or near-constant columns?"]}}
 """
 
 PROMPT_STATS_TASK = """\

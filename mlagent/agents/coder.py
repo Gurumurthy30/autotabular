@@ -34,16 +34,25 @@ KIT API — module `mlkit` is in the working directory. ALWAYS start with `from 
 """
 
 RULES = """\
-Rules:
-- Reply with exactly ONE ```python block and nothing else.
-- Use only installed libraries (listed in the prompt). Fix randomness with SEED.
-- Never use TARGET or ID as features. Never touch test labels. Fit every imputer/encoder/scaler/
-  target-encoder INSIDE fit_predict using X_tr only (row-wise feature creation before CV is fine).
-- No plotting, no network, no input(). Print almost nothing (the last stdout line is parsed).
-- Keep runtime modest (<= 500 trees / early stopping). Do not edit mlkit.py or ledger.json.
+Contract & Non-Negotiables:
+- Reply with exactly ONE ```python block and nothing else (no text outside the block).
+- Begin the script with a concise plan docstring (HYPOTHESIS, CHANGE, LEAKAGE CHECK, EXPECTED RUNTIME, FALLBACKS).
+- Use the project's helpers (`from mlkit import *`). Never re-implement fold splitting; always score via `run_cv(...)`.
+- No leakage: Never use TARGET or ID as features. Never touch test labels. Fit every imputer, encoder, scaler, and target-encoder INSIDE fit_predict on X_tr only.
+- Test predictions: Ensure predictions match test set structure (probabilities for classification metrics, values for regression).
+- Implement exactly the declared change.
+- Engineering habits: Fail loudly (no blanket try/except hiding crashes). Quiet output (disable verbose logs/progress bars). Respect the time limit. Fix randomness with SEED.
+- Do not edit mlkit.py or ledger.json.
 """
 
 SKELETON_EXPERIMENT = '''\
+"""
+HYPOTHESIS: Baseline Random Forest pipeline
+CHANGE: Minimal preprocessing + RandomForest
+LEAKAGE CHECK: Preprocessing fit on X_tr only
+EXPECTED RUNTIME: < 1 minute
+FALLBACKS / DOWNGRADE: None
+"""
 from mlkit import *
 from sklearn.ensemble import RandomForestClassifier   # RandomForestRegressor for regression
 
@@ -69,7 +78,13 @@ out = {}
 emit(out)
 '''
 
-CODER_SYSTEM = f"You write ONE self-contained Python 3 script for a tabular ML workflow.\n\n{KIT_API}\n{RULES}"
+CODER_SYSTEM = f"""\
+You are a senior ML engineer writing ONE self-contained Python 3 script evaluated on fixed cross-validation folds. Correctness and honesty come first, then speed, then cleverness.
+
+{KIT_API}
+
+{RULES}\
+"""
 
 PROMPTS = {
     "kit_api": KIT_API,
