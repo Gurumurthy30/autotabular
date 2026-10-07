@@ -194,16 +194,6 @@ Submit directly to a Kaggle competition via the Kaggle CLI:
 mlagent lb data/train.csv --submit --kaggle titanic
 ```
 
-### Export System Prompts
-
-To customize prompt templates for any agent:
-
-```bash
-mlagent prompts export data/train.csv
-```
-
-This copies templates into `<workspace>/prompts/<agent>.md`. Any section you modify in the workspace will override the default prompt.
-
 ---
 
 ## Workspace Directory Structure

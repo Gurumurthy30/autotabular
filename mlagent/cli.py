@@ -7,7 +7,6 @@
   mlagent status <path>           runs / queue / result of a workspace
   mlagent lb <path> --score 0.77  record a public-LB score and check the CV/LB gap (or --submit to send it)
   mlagent config init [path]      write a commented mlagent.yaml
-  mlagent prompts export <path>   copy the default prompts into <workspace>/prompts/ to tune them
   mlagent graph                   print the LangGraph as mermaid
 
 The workspace is created NEXT TO THE DATA:  <data_dir>/mlagent_<train_stem>/
@@ -36,16 +35,54 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 
 from . import config as cfgmod
-from . import doctor, lb, llm, prompts, ui
+from . import doctor, lb, llm, ui
 from .build_graph import mermaid, run_pipeline
 from .ledger import Workspace, experiments_used, load, load_control, save, session
 from .state import Env, Ledger, Problem
 
 LIBS = ("numpy", "pandas", "scikit-learn", "lightgbm", "xgboost", "catboost", "optuna")
-MIN_METRICS = {"rmse", "mae", "mse", "logloss", "log_loss", "rmsle"}
+MIN_METRICS = {"rmse", "mae", "mse", "logloss", "log_loss", "rmsle", "bce", "cross_entropy"}
 METRICS = {"binary": ["accuracy", "roc_auc", "f1", "logloss"],
            "multiclass": ["accuracy", "f1_macro", "logloss"],
            "regression": ["rmse", "mae", "r2", "rmsle"]}
+
+METRIC_ALIASES = {
+    "roc": "roc_auc",
+    "auc": "roc_auc",
+    "roc_auc": "roc_auc",
+    "rocauc": "roc_auc",
+    "auc_roc": "roc_auc",
+    "acc": "accuracy",
+    "accuracy": "accuracy",
+    "f1": "f1",
+    "f1_score": "f1",
+    "f1_binary": "f1",
+    "f1_macro": "f1_macro",
+    "macro_f1": "f1_macro",
+    "f1_weighted": "f1_weighted",
+    "weighted_f1": "f1_weighted",
+    "f1_micro": "f1_micro",
+    "micro_f1": "f1_micro",
+    "logloss": "logloss",
+    "log_loss": "logloss",
+    "bce": "logloss",
+    "cross_entropy": "logloss",
+    "rmse": "rmse",
+    "root_mean_squared_error": "rmse",
+    "mse": "mse",
+    "mean_squared_error": "mse",
+    "mae": "mae",
+    "mean_absolute_error": "mae",
+    "r2": "r2",
+    "r_squared": "r2",
+    "rmsle": "rmsle",
+    "root_mean_squared_log_error": "rmsle",
+}
+
+
+def normalize_metric(m: str) -> str:
+    s = str(m).strip().lower().replace("-", "_").replace(" ", "_")
+    return METRIC_ALIASES.get(s, s)
 
 
 # ---- inference helpers -------------------------------------------------------------------------
@@ -119,6 +156,7 @@ def build_problem(train: Path, args, goal: str | None = None) -> Problem:
     metric = getattr(args, "metric", None) or METRICS[tt][0]
     if interactive and not getattr(args, "metric", None):
         metric = Prompt.ask(f"Metric ({tt})", default=metric)
+    metric = normalize_metric(metric)
     goal = goal or getattr(args, "goal", None) or f"Predict {target} from {train.name}"
     return Problem(goal=goal, target=target, metric=metric, direction="minimize" if metric.lower() in MIN_METRICS else "maximize",
                    task_type=tt, train_path=str(train.resolve()),  # type: ignore[arg-type]
@@ -358,9 +396,6 @@ def main(argv: list[str] | None = None) -> None:
     cp = sub.add_parser("config", help="config helpers")
     cp.add_argument("action", choices=["init"])
     cp.add_argument("path", nargs="?", default="mlagent.yaml")
-    pp = sub.add_parser("prompts", help="prompt helpers")
-    pp.add_argument("action", choices=["export"])
-    pp.add_argument("path", nargs="?", default=".")
     doc = sub.add_parser("doctor", help="diagnose environment, dependencies, GPU, Ollama")
     doc.add_argument("path", nargs="?", default=None, help="optional path to verify write access")
     doc.add_argument("--model", help="model tag to check (e.g. gemma4:31b-cloud)")
@@ -386,9 +421,6 @@ def main(argv: list[str] | None = None) -> None:
         else:
             p.write_text(cfgmod.TEMPLATE, encoding="utf-8")
             ui.ok(f"wrote {p}")
-    elif a.cmd == "prompts":
-        files = prompts.export(Workspace.resolve(a.path))
-        ui.ok(f"exported {len(files)} prompt files to {files[0].parent} — edit them; only changed sections override")
     elif a.cmd == "graph":
         print(mermaid())
     else:

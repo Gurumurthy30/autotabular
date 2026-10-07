@@ -12,6 +12,18 @@ from .. import ensemble, ui
 from ..ledger import Workspace, approved_runs, best_run, load, ok_runs, run_rows, session, verdicts
 from ..llm import RateLimitError, get_llm
 from ..state import FinalResult
+from ..ensemble import evaluate, choose, predict
+
+PROMPT_SUMMARY_SYSTEM = (
+    "You write a 5-sentence executive summary of an ML run for a data scientist: "
+    "(1) the best result and how it was validated, (2) what moved the score, (3) what did not, "
+    "(4) the main risk or caveat, (5) the single most valuable next experiment. "
+    "Use only the facts given; if a fact is missing, say it is unknown."
+)
+
+PROMPTS = {
+    "summary_system": PROMPT_SUMMARY_SYSTEM,
+}
 
 
 def _mask(oofs: dict[str, np.ndarray]) -> np.ndarray:
@@ -122,8 +134,7 @@ def run(ws: Workspace) -> None:
 
     summary = ""
     try:
-        summary = get_llm().chat("You write a 5-sentence executive summary of an ML run for a data scientist. "
-                                 "Use only the facts given.", f"stop={L.stop_reason} final={fin.model_dump()} runs={run_rows(L)}")
+        summary = get_llm().chat(PROMPT_SUMMARY_SYSTEM, f"stop={L.stop_reason} final={fin.model_dump()} runs={run_rows(L)}")
     except RateLimitError:
         pass
     except Exception:                                       # noqa: BLE001

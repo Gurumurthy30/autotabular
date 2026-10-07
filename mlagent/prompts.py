@@ -1,19 +1,29 @@
-"""Prompt loader. One markdown file per agent in mlagent/prompts/, split into `=== name ===` sections.
+"""Prompt loader and exporter.
 
-Override per project: put <workspace>/prompts/<agent>.md next to the data — only the sections you
-define there replace the defaults (the rest fall back).  `mlagent prompts export <path>` copies the
-defaults into the workspace so you can edit them.  Placeholders look like <<name>>.
+Each agent module in mlagent/agents/<agent>.py defines its own prompts directly in code via PROMPTS.
+Workspace overrides (optional): <workspace>/prompts/<agent>.md can still override specific sections.
 """
 
 from __future__ import annotations
 
+import importlib
 import re
-import shutil
 from functools import lru_cache
 from pathlib import Path
 
-_DIR = Path(__file__).with_name("prompts")
 _HDR = re.compile(r"^=== (\w+) ===[ \t]*$", re.M)
+
+AGENT_NAMES = (
+    "profiler",
+    "strategist",
+    "coder",
+    "experimenter",
+    "validator",
+    "analyzer",
+    "tuner",
+    "docs",
+    "finisher",
+)
 
 
 def _parse(text: str) -> dict[str, str]:
@@ -23,7 +33,11 @@ def _parse(text: str) -> dict[str, str]:
 
 @lru_cache(maxsize=None)
 def _default(agent: str) -> dict[str, str]:
-    return _parse((_DIR / f"{agent}.md").read_text(encoding="utf-8"))
+    try:
+        mod = importlib.import_module(f"mlagent.agents.{agent}")
+        return dict(getattr(mod, "PROMPTS", {}))
+    except Exception:
+        return {}
 
 
 def sections(agent: str, ws=None) -> dict[str, str]:
@@ -46,7 +60,10 @@ def export(ws) -> list[Path]:
     dest = Path(ws.root) / "prompts"
     dest.mkdir(parents=True, exist_ok=True)
     out = []
-    for f in sorted(_DIR.glob("*.md")):
-        shutil.copy(f, dest / f.name)
-        out.append(dest / f.name)
+    for agent in AGENT_NAMES:
+        secs = _default(agent)
+        text = "\n".join(f"=== {k} ===\n{v}" for k, v in secs.items()) + "\n"
+        dest_file = dest / f"{agent}.md"
+        dest_file.write_text(text, encoding="utf-8")
+        out.append(dest_file)
     return out

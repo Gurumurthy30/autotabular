@@ -29,7 +29,10 @@ SEED = _L["env"]["seed"]
 N_JOBS = int(os.environ.get("MLAGENT_N_JOBS", "-1"))   # threads per worker (parallel runs share the CPU)
 TARGET, ID, METRIC, TASK = PROBLEM["target"], PROBLEM.get("id_column"), PROBLEM["metric"], PROBLEM["task_type"]
 
-_LABEL_METRICS = {"accuracy", "acc", "f1", "f1_macro", "f1_weighted", "f1_binary"}
+_LABEL_METRICS = {
+    "accuracy", "acc", "f1", "f1_binary", "f1_score",
+    "f1_macro", "macro_f1", "f1_weighted", "weighted_f1", "f1_micro", "micro_f1",
+}
 
 
 def _mk(m):
@@ -88,23 +91,32 @@ def score(y_true, y_pred, metric=None):
     m, yt, yp = _mk(metric or METRIC), np.asarray(y_true), np.asarray(y_pred, dtype=float)
     if m in ("accuracy", "acc"):
         return float(M.accuracy_score(yt, _lab(yp)))
-    if m in ("f1", "f1_binary"):
+    if m in ("f1", "f1_binary", "f1_score"):
         return float(M.f1_score(yt, _lab(yp), average="binary" if TASK == "binary" else "macro"))
-    if m in ("f1_macro", "f1_weighted"):
-        return float(M.f1_score(yt, _lab(yp), average=m.split("_")[1]))
-    if m in ("roc_auc", "auc"):
-        return float(M.roc_auc_score(yt, yp, multi_class="ovr") if yp.ndim == 2 else M.roc_auc_score(yt, yp))
-    if m in ("logloss", "log_loss"):
+    if m in ("f1_macro", "macro_f1"):
+        return float(M.f1_score(yt, _lab(yp), average="macro"))
+    if m in ("f1_weighted", "weighted_f1"):
+        return float(M.f1_score(yt, _lab(yp), average="weighted"))
+    if m in ("f1_micro", "micro_f1"):
+        return float(M.f1_score(yt, _lab(yp), average="micro"))
+    if m in ("roc_auc", "auc", "roc", "rocauc", "auc_roc", "area_under_curve"):
+        if yp.ndim == 2:
+            if yp.shape[1] == 2:
+                yp = yp[:, 1]
+            elif TASK == "multiclass":
+                return float(M.roc_auc_score(yt, yp, multi_class="ovr"))
+        return float(M.roc_auc_score(yt, yp))
+    if m in ("logloss", "log_loss", "bce", "cross_entropy"):
         return float(M.log_loss(yt, np.clip(yp, 1e-15, 1 - 1e-15), labels=list(range(max(2, len(CLASSES))))))
-    if m == "rmse":
+    if m in ("rmse", "root_mean_squared_error"):
         return float(np.sqrt(M.mean_squared_error(yt, yp)))
-    if m == "mse":
+    if m in ("mse", "mean_squared_error"):
         return float(M.mean_squared_error(yt, yp))
-    if m == "mae":
+    if m in ("mae", "mean_absolute_error"):
         return float(M.mean_absolute_error(yt, yp))
-    if m == "r2":
+    if m in ("r2", "r_squared", "r2_score"):
         return float(M.r2_score(yt, yp))
-    if m == "rmsle":
+    if m in ("rmsle", "root_mean_squared_log_error"):
         return float(np.sqrt(M.mean_squared_log_error(yt, np.clip(yp, 0, None))))
     raise ValueError(f"unsupported metric: {m}")
 

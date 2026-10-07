@@ -23,12 +23,29 @@ RARE_OBJECTS = {
     "optuna": ["optuna.create_study", "optuna.study.Study.optimize"],
 }
 
-SYSTEM_Q = ("An ML script failed. From the error and script, name the Python library at fault and the dotted "
-            "paths of the objects whose signature/docstring we should inspect (e.g. lightgbm.LGBMClassifier.fit). "
-            "Fields: library (string), objects (list of dotted paths).")
-SYSTEM_SHEET = ("Write a cheat sheet (max 25 lines, plain text) for a coder using this library version. "
-                "ONLY facts present in the inspected signatures/docstrings: correct import, constructor/fit "
-                "kwargs, removed or renamed arguments, one minimal usage example. No speculation.")
+PROMPT_QUERY_SYSTEM = (
+    "An ML script failed with a library-usage error. From the traceback and the script tail, identify "
+    "(a) the Python library at fault and (b) the dotted paths of the objects whose signature/docstring would "
+    "settle the question (e.g. lightgbm.LGBMClassifier.fit). Prefer the exact class or function in the failing line "
+    "over the whole module. Fields: library (string), objects (list of dotted paths, at most 5)."
+)
+
+PROMPT_SHEET_SYSTEM = (
+    "You write a cheat sheet (max 25 lines, plain text) for a coder who just hit this error with this INSTALLED "
+    "library version. Use ONLY facts present in the inspected signatures/docstrings (keys without a prefix) or in web "
+    "text (keys starting with 'web:'). The local inspection describes the installed version and wins on any conflict; "
+    "web pages may describe another version. Begin with a line 'FIX:' that says what the error means and the correct "
+    "call. Then: correct import, constructor/fit keyword arguments, arguments that were removed or renamed, and one "
+    "minimal usage example. No speculation; if the evidence does not settle something, write 'unknown'."
+)
+
+PROMPTS = {
+    "query_system": PROMPT_QUERY_SYSTEM,
+    "sheet_system": PROMPT_SHEET_SYSTEM,
+}
+
+SYSTEM_Q = PROMPT_QUERY_SYSTEM
+SYSTEM_SHEET = PROMPT_SHEET_SYSTEM
 
 INTROSPECT = '''
 import importlib, inspect, json

@@ -18,6 +18,3 @@ mlagent = "mlagent.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["mlagent*"]
-
-[tool.setuptools.package-data]
-mlagent = ["prompts/*.md"]

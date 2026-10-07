@@ -70,7 +70,7 @@ def check_python() -> tuple[bool, str]:
 
 def check_virtualenv() -> tuple[bool, str]:
     in_venv = sys.prefix != getattr(sys, "base_prefix", sys.prefix)
-    return in_venv, f"Virtualenv: {'active (' + sys.prefix + ')' if in_venv else 'NOT in a virtual environment'}"
+    return in_venv, f"Virtualenv: {'active (' + sys.prefix + ')' if in_venv else 'using system Python (virtualenv recommended)'}"
 
 
 def check_mlagent_pkg() -> tuple[bool, str]:
@@ -189,15 +189,22 @@ def check_console_encoding() -> tuple[bool, str]:
         return False, f"Console encoding cannot render UTF-8 glyphs: {e}"
 
 
-def check_write_permission(folder: Path) -> tuple[bool, str]:
+def check_write_permission(target: Path) -> tuple[bool, str]:
     try:
+        # If target is a file or has a file extension, test its parent directory
+        folder = target.parent if (target.is_file() or target.suffix) else target
+        if not folder or str(folder) == ".":
+            folder = Path.cwd()
         folder.mkdir(parents=True, exist_ok=True)
         test_file = folder / ".mlagent_doctor_test"
         test_file.write_text("ok", encoding="utf-8")
         test_file.unlink()
-        return True, f"Write permission verified on {folder}"
+        if target.is_file():
+            size = target.stat().st_size
+            return True, f"Dataset readable ({size:,} bytes); write permission verified on {folder.resolve()}"
+        return True, f"Write permission verified on {folder.resolve()}"
     except Exception as e:
-        return False, f"Cannot write to {folder}: {e}"
+        return False, f"Cannot write to target location: {e}"
 
 
 def run_doctor(target_folder: str | None = None, model: str | None = None, check_json: bool = False) -> bool:
@@ -221,7 +228,7 @@ def run_doctor(target_folder: str | None = None, model: str | None = None, check
     ok, msg = check_python()
     add_row("Environment", "Python >= 3.10", ok, msg)
     ok, msg = check_virtualenv()
-    add_row("Environment", "Virtualenv", ok, msg)
+    add_row("Environment", "Virtualenv", ok, msg, info_only=True)
     ok, msg = check_console_encoding()
     add_row("Environment", "Console Encoding", ok, msg)
     ok, msg = check_mlagent_pkg()

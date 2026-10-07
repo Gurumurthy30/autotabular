@@ -71,6 +71,14 @@ emit(out)
 
 CODER_SYSTEM = f"You write ONE self-contained Python 3 script for a tabular ML workflow.\n\n{KIT_API}\n{RULES}"
 
+PROMPTS = {
+    "kit_api": KIT_API,
+    "rules": RULES,
+    "system": CODER_SYSTEM,
+    "skeleton_experiment": SKELETON_EXPERIMENT,
+    "skeleton_analysis": SKELETON_ANALYSIS,
+}
+
 
 class HypoOut(Base):
     """What an LLM proposes for the queue (lenient); converted to a strict QueueItem in code."""

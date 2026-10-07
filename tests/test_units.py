@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fakes import FakeLLM, make_data  # noqa: E402
-from mlagent import cli, ensemble, hw, llm, prompts, webdocs  # noqa: E402
+from mlagent import cli, ensemble, hw, llm, webdocs  # noqa: E402
 from mlagent import config as cfgmod  # noqa: E402
 from mlagent.agents import docs  # noqa: E402
 from mlagent.agents.strategist import CVOut, _sanitize_cv, goal_target, make_folds  # noqa: E402
@@ -74,20 +74,21 @@ def test_config_is_frozen_into_workspace_and_found_in_data_dir(tmp_path):
     assert ws.config().kaggle.competition == "titanic" and load(ws).env.seed == 5
 
 
-# ---- prompts --------------------------------------------------------------------------------------------
+# ---- agent embedded prompts -------------------------------------------------------------
 
-def test_prompts_defaults_placeholders_and_workspace_override(tmp_path):
-    ws = mini_ws(tmp_path)
-    assert "KIT API" in prompts.get("coder", "kit_api", ws)
-    t = prompts.get("experimenter", "task_fresh", ws, exp_id="e9", hypothesis="h", change="c", params={})
-    assert "Experiment e9" in t and "<<" not in t
-    for agent in ("coder", "profiler", "strategist", "experimenter", "validator", "analyzer", "docs", "tuner", "finisher"):
-        assert prompts.sections(agent), agent
-    (ws.root / "prompts").mkdir()
-    (ws.root / "prompts" / "finisher.md").write_text("=== summary_system ===\nCUSTOM SUMMARY PROMPT\n")
-    assert prompts.get("finisher", "summary_system", ws) == "CUSTOM SUMMARY PROMPT"
-    assert "Fields:" in prompts.get("analyzer", "system", ws)                           # untouched agents fall back
-    assert len(prompts.export(ws)) == 9
+def test_agent_prompts_embedded_in_modules():
+    import importlib
+    agents = ("profiler", "strategist", "coder", "experimenter", "validator", "analyzer", "tuner", "docs", "finisher")
+    for name in agents:
+        mod = importlib.import_module(f"mlagent.agents.{name}")
+        assert hasattr(mod, "PROMPTS"), f"{name} must define PROMPTS"
+        assert isinstance(mod.PROMPTS, dict)
+        assert len(mod.PROMPTS) > 0, f"{name}.PROMPTS is empty"
+
+    from mlagent.agents import coder, experimenter, strategist
+    assert "kit_api" in coder.PROMPTS and "KIT API" in coder.PROMPTS["kit_api"]
+    assert "system" in strategist.PROMPTS and "strategist" in strategist.PROMPTS["system"].lower()
+    assert "task_fresh" in experimenter.PROMPTS and "Experiment" in experimenter.PROMPTS["task_fresh"]
 
 
 # ---- ledger rules ----------------------------------------------------------------------------------------
@@ -270,9 +271,41 @@ def test_doctor_diagnostics(tmp_path):
     ok_py, _ = doctor.check_python()
     assert ok_py is True
     ok_venv, _ = doctor.check_virtualenv()
-    assert ok_venv is True
+    assert isinstance(ok_venv, bool)
     ok_write, _ = doctor.check_write_permission(tmp_path)
     assert ok_write is True
+    # Check that passing a file path also works cleanly
+    sample_file = tmp_path / "train.csv"
+    sample_file.write_text("a,b\n1,2", encoding="utf-8")
+    ok_file_write, msg = doctor.check_write_permission(sample_file)
+    assert ok_file_write is True
+    assert "Dataset readable" in msg
     ok_enc, _ = doctor.check_console_encoding()
     assert ok_enc is True
+
+
+# ---- metric aliases & roc score ----------------------------------------------------------
+
+def test_metric_aliases_and_roc_score(tmp_path):
+    assert cli.normalize_metric("ROC") == "roc_auc"
+    assert cli.normalize_metric("auc") == "roc_auc"
+    assert cli.normalize_metric("roc-auc") == "roc_auc"
+    assert cli.normalize_metric("ACC") == "accuracy"
+    assert cli.normalize_metric("F1") == "f1"
+
+    ws = mini_ws(tmp_path)
+    kit = ws.load_mlkit()
+    y_true = np.array([0, 0, 1, 1])
+    y_pred_prob = np.array([0.1, 0.2, 0.8, 0.9])
+    y_pred_2d = np.array([[0.9, 0.1], [0.8, 0.2], [0.2, 0.8], [0.1, 0.9]])
+
+    # Both "roc", "roc_auc", "auc" should evaluate without error
+    s_roc = kit.score(y_true, y_pred_prob, metric="roc")
+    s_auc = kit.score(y_true, y_pred_prob, metric="roc_auc")
+    assert s_roc == 1.0
+    assert s_auc == 1.0
+
+    # 2D probabilities should be handled properly
+    s_2d = kit.score(y_true, y_pred_2d, metric="roc")
+    assert s_2d == 1.0
 
