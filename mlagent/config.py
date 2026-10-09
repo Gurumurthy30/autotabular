@@ -18,7 +18,7 @@ from .state import Base, Budget
 
 
 class ModelCfg(Base):
-    tag: str = "gemma4:31b"            # verify the exact tag in Phase 0
+    tag: str = "gemma4:31b-cloud"            # cloud-hosted Ollama model
     host: str | None = None            # Ollama host (also OLLAMA_HOST); key via OLLAMA_API_KEY
     temperature: float = 0.2
 
@@ -68,14 +68,14 @@ CLI_MAP = {"model": "model.tag", "workers": "parallel.workers", "max_experiments
 TEMPLATE = """\
 # mlagent configuration (precedence: this file < env vars < CLI flags)
 model:
-  tag: gemma4:31b          # exact Ollama tag; env MLAGENT_MODEL overrides
+  tag: gemma4:31b-cloud    # exact Ollama tag; env MLAGENT_MODEL overrides
   host: null               # env OLLAMA_HOST overrides; API key only via env OLLAMA_API_KEY
   temperature: 0.2
 seed: 42
 target_score: null         # stop early once the best CV reaches this (else read from the goal text)
 budget:
   max_experiments: 15
-  max_minutes: 120
+  max_minutes: 60
   plateau_n: 3             # approved runs without a counted gain
   analyze_every: 3         # K: Analyzer every K runs
   tune_top_n: 3

@@ -251,7 +251,7 @@ def run_doctor(target_folder: str | None = None, model: str | None = None, check
     add_row("External", "Kaggle CLI", ok, msg, info_only=True)
 
     # Ollama
-    m_tag = model or os.environ.get("MLAGENT_MODEL", "gemma4:31b")
+    m_tag = model or os.environ.get("MLAGENT_MODEL", "gemma4:31b-cloud")
     for name, ok, msg in check_ollama(m_tag):
         add_row("Ollama", name, ok, msg, info_only=(name == "Ollama CLI" and not ok))
 

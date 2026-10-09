@@ -7,7 +7,7 @@
 
 **`mlagent`** is a production-grade, CLI multi-agent machine learning engineer built on **LangGraph**. It autonomously explores, codes, evaluates, diagnoses, tunes, and ensembles machine learning models for tabular datasets and Kaggle competitions.
 
-Driven by a single local or remote LLM (default `gemma4:31b` or any compatible model via Ollama) and governed by a **deterministic controller**, `mlagent` prevents hallucinations, maintains strictly honest cross-validation folds, self-heals from runtime and memory errors, and generates competitive submission files.
+Driven by a single local or remote LLM (default `gemma4:31b-cloud` or any compatible model via Ollama) and governed by a **deterministic controller**, `mlagent` prevents hallucinations, maintains strictly honest cross-validation folds, self-heals from runtime and memory errors, and generates competitive submission files.
 
 ---
 
@@ -146,12 +146,12 @@ Configure your LLM provider. `mlagent` supports both local and cloud-hosted Olla
 
 ```env
 # For Local Ollama (default: http://localhost:11434)
-OLLAMA_MODEL=gemma4:31b
+OLLAMA_MODEL=gemma4:31b-cloud
 
 # For Remote / Cloud Ollama
 OLLAMA_BASE_URL=https://ollama.com
 OLLAMA_API_KEY=your_ollama_api_key_here
-OLLAMA_MODEL=gemma4:31b
+OLLAMA_MODEL=gemma4:31b-cloud
 ```
 
 *(You can also override the model via `MLAGENT_MODEL=qwen2.5:32b` or `--model` CLI flag).*
@@ -253,7 +253,7 @@ mlagent config init
 ```
 
 Available keys include:
-- `model`: LLM model name (`gemma4:31b`, `qwen2.5:32b`, etc.).
+- `model`: LLM model name (`gemma4:31b-cloud`, `qwen2.5:32b`, etc.).
 - `seed`: Random seed for reproducibility.
 - `budget.max_experiments`: Maximum number of experiments before stopping.
 - `parallel.workers`: Concurrency limit for execution.

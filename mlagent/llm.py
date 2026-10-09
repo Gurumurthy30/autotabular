@@ -1,4 +1,4 @@
-"""Single-model wrapper (default gemma4:31b via Ollama): one call at a time, 429 backoff, JSON/code extraction.
+"""Single-model wrapper (default gemma4:31b-cloud via Ollama): one call at a time, 429 backoff, JSON/code extraction.
 
 Env: MLAGENT_MODEL (verify the exact tag!), OLLAMA_HOST, OLLAMA_API_KEY.
 """
@@ -54,7 +54,7 @@ _injected = False
 
 class LLM:
     def __init__(self, model: str | None = None, host: str | None = None, temperature: float | None = None):
-        self.model = model or _defaults["model"] or os.getenv("MLAGENT_MODEL") or os.getenv("OLLAMA_MODEL") or "gemma4:31b"
+        self.model = model or _defaults["model"] or os.getenv("MLAGENT_MODEL") or os.getenv("OLLAMA_MODEL") or "gemma4:31b-cloud"
         self.host = host or _defaults["host"] or os.getenv("OLLAMA_HOST") or os.getenv("OLLAMA_BASE_URL")
         self.temperature = temperature if temperature is not None else _defaults["temperature"]
         self._lock = threading.Lock()          # free tier: 1 concurrent call

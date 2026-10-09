@@ -40,7 +40,7 @@ class Problem(Base):
 
 class Budget(Base):
     max_experiments: int = 15
-    max_minutes: int = 120
+    max_minutes: int = 60
     plateau_n: int = 3        # approved runs without a counted gain
     analyze_every: int = 3    # K: run the Analyzer every K runs
     tune_top_n: int = 3
