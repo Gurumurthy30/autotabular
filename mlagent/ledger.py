@@ -13,8 +13,11 @@ import os
 import re
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
+from typing import Any
+
+import numpy as np
 
 from .state import Ledger, QueueItem, Run
 
@@ -33,12 +36,12 @@ class Workspace:
         self.logs = self.root / "logs"
 
     @classmethod
-    def for_data(cls, train_path: str | Path) -> "Workspace":
+    def for_data(cls, train_path: str | Path) -> Workspace:
         p = Path(train_path).expanduser().resolve()
         return cls(p.parent / f"mlagent_{p.stem}")
 
     @classmethod
-    def resolve(cls, p: str | Path) -> "Workspace":
+    def resolve(cls, p: str | Path) -> Workspace:
         """Accept a workspace dir, a dir that contains one, or the data file itself."""
         p = Path(p).expanduser().resolve()
         if p.is_dir():
@@ -50,7 +53,7 @@ class Workspace:
             raise FileNotFoundError(f"no mlagent workspace found in {p}")
         return cls.for_data(p)
 
-    def make(self) -> "Workspace":
+    def make(self) -> Workspace:
         for d in (self.root, self.scripts, self.artifacts, self.logs):
             d.mkdir(parents=True, exist_ok=True)
         return self
@@ -265,7 +268,7 @@ def hard_stop(L: Ledger) -> str | None:
 
 _OOM_ERR = re.compile(
     r"CUDA out of memory|OutOfMemoryError|out of memory|MemoryError|Unable to allocate|bad_alloc|"
-    r"cudaErrorMemoryAllocation|CUBLAS_STATUS_ALLOC_FAILED|ResourceExhausted", re.I)
+    r"cudaErrorMemoryAllocation|CUBLAS_STATUS_ALLOC_FAILED|ResourceExhausted", re.IGNORECASE)
 
 
 def is_oom_error(err: str) -> bool:
@@ -275,7 +278,7 @@ def is_oom_error(err: str) -> bool:
 
 _API_ERR = re.compile(
     r"AttributeError|unexpected keyword|got an unexpected|positional argument|"
-    r"cannot import name|TypeError|has no attribute|is not a valid parameter|Invalid parameter", re.I)
+    r"cannot import name|TypeError|has no attribute|is not a valid parameter|Invalid parameter", re.IGNORECASE)
 
 
 def is_api_error(err: str) -> bool:
@@ -302,8 +305,30 @@ def unvalidated_ids(L: Ledger) -> list[str]:
 
 # ---- persisted routing flags (so resume does not forget retries / the tuner stage) ----------------
 
-CONTROL_KEYS = ("retries", "oom_retries", "tuned", "tuner_ids", "tuner_retry_used", "reentry_left",
+CONTROL_KEYS = ("next", "retries", "oom_retries", "tuned", "tuner_ids", "tuner_retry_used", "reentry_left",
                 "runs_since_analysis", "analyzer_empty", "pending_validation", "crashes", "analysis_trigger")
+
+OLD_TO_NEW_GRAPH_NODES = {
+    "profiler": "data_profiler",
+    "strategist": "experiment_planner",
+    "controller": "pipeline_controller",
+    "experimenter": "experiment_runner",
+    "validator": "run_validator",
+    "analyzer": "results_analyzer",
+    "docs": "api_docs_lookup",
+    "tuner": "hyperparameter_tuner",
+    "finisher": "final_submission",
+}
+
+
+def migrate_control_state(state: dict) -> dict:
+    """Migrate legacy control.json node names to new readable pipeline graph node names."""
+    if not isinstance(state, dict):
+        return {}
+    res = dict(state)
+    if "next" in res and res["next"] in OLD_TO_NEW_GRAPH_NODES:
+        res["next"] = OLD_TO_NEW_GRAPH_NODES[res["next"]]
+    return res
 
 
 def save_control(ws: Workspace, state: dict) -> None:
@@ -312,7 +337,8 @@ def save_control(ws: Workspace, state: dict) -> None:
 
 def load_control(ws: Workspace) -> dict:
     try:
-        return json.loads(ws.control_path.read_text(encoding="utf-8"))
+        data = json.loads(ws.control_path.read_text(encoding="utf-8"))
+        return migrate_control_state(data)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
@@ -326,37 +352,215 @@ def run_rows(L: Ledger, last: int | None = None, only: str | None = None) -> lis
     return rows[-last:] if last else rows
 
 
-def profile_digest(L: Ledger) -> dict:
+def profile_digest(L: Ledger, max_notes: int = 8) -> dict:
     p = L.profile
     if p is None:
         return {}
     roles: dict[str, list[str]] = {}
     for c, r in p.column_roles.items():
         roles.setdefault(r, []).append(c)
-    return {"roles": roles, "target": p.target_stats,
-            "missing": {c: round(f, 3) for c, f in p.missing.items() if f > 0.01},
-            "leakage_flags": p.leakage_flags, "notes": p.notes[:8]}
+    tagged = [n for n in p.notes if ":" in n]
+    untagged = [n for n in p.notes if ":" not in n]
+    ordered_notes = (tagged + untagged)[:max_notes]
+    res = {
+        "roles": roles,
+        "target": p.target_stats,
+        "missing": {c: round(f, 3) for c, f in p.missing.items() if f > 0.01},
+        "leakage_flags": p.leakage_flags,
+        "notes": ordered_notes,
+    }
+    if p.modality:
+        res["modality"] = p.modality
+    if p.data_files:
+        res["data_files"] = p.data_files
+    return res
+
+
+def budget_digest(L: Ledger) -> dict:
+    """Budget block for Strategist and Analyzer."""
+    b = L.env.budget
+    return {
+        "max_experiments": b.max_experiments,
+        "experiments_used": experiments_used(L),
+        "max_minutes": b.max_minutes,
+        "minutes_elapsed": round(minutes_elapsed(L), 1),
+        "loop_fraction": b.loop_fraction,
+        "max_run_minutes": b.max_run_minutes,
+        "tune_minutes_per_model": b.tune_minutes_per_model,
+    }
+
+
+def earlier_analyses_digest(L: Ledger) -> list[dict]:
+    """Last 4 entries of L.analysis (bottleneck, evidence, hypothesis count)."""
+    return [
+        {
+            "bottleneck": a.bottleneck,
+            "evidence": a.evidence,
+            "hypothesis_count": len(a.new_ids),
+        }
+        for a in L.analysis[-4:]
+    ]
+
+
+def gains_by_kind(L: Ledger) -> dict[str, dict[str, int]]:
+    """Per kind (feature/model), count approved runs and counted gains using counted_gain_flags()."""
+    kind_map = {q.id: q.kind for q in L.queue}
+    app = approved_runs(L, "experimenter")
+    flags = counted_gain_flags(L)
+    res = {
+        "feature": {"approved": 0, "gains": 0},
+        "model": {"approved": 0, "gains": 0},
+    }
+    for r, is_gain in zip(app, flags):
+        k = kind_map.get(r.exp_id, "model")
+        if k in res:
+            res[k]["approved"] += 1
+            if is_gain:
+                res[k]["gains"] += 1
+    return res
+
+
+def curated_run_rows(L: Ledger) -> list[dict]:
+    """Curated runs for Analyzer: first run, best approved, counted gains, and 8 most recent runs in time order."""
+    if not L.runs:
+        return []
+    v = verdicts(L)
+    all_rows = [
+        {"exp": r.exp_id, "src": r.source, "cv": _r(r.cv_mean), "std": _r(r.cv_std),
+         "holdout": _r(r.holdout), "verdict": None if r.error else v.get(r.exp_id),
+         "error": (r.error or "")[:160] or None}
+        for r in L.runs
+    ]
+    app = approved_runs(L, "experimenter")
+    flags = counted_gain_flags(L)
+    gain_exps = {r.exp_id for r, f in zip(app, flags) if f}
+    b = best_run(L)
+    best_exp = b.exp_id if b else None
+
+    indices: set[int] = {0}
+    n = len(all_rows)
+    for i in range(max(0, n - 8), n):
+        indices.add(i)
+    for i, row in enumerate(all_rows):
+        if row["exp"] == best_exp or row["exp"] in gain_exps:
+            indices.add(i)
+
+    chosen = [all_rows[i] for i in sorted(indices)]
+    seen: set[str] = set()
+    deduped = []
+    for row in chosen:
+        if row["exp"] not in seen:
+            seen.add(row["exp"])
+            deduped.append(row)
+    return deduped
+
+
+def per_fold_scores_digest(L: Ledger) -> dict[str, Any] | None:
+    """Returns fold scores and their spread for the best approved run."""
+    b = best_run(L)
+    if not b or not b.fold_scores:
+        return None
+    spread = round(max(b.fold_scores) - min(b.fold_scores), 5) if b.fold_scores else 0.0
+    return {
+        "exp_id": b.exp_id,
+        "fold_scores": b.fold_scores,
+        "spread": spread,
+    }
+
+
+def train_val_gap_digest(L: Ledger) -> dict[str, Any] | None:
+    """Returns train vs validation score gap when train_score is recorded."""
+    b = best_run(L)
+    if not b or b.train_score is None or b.cv_mean is None:
+        return None
+    return {
+        "exp_id": b.exp_id,
+        "train_score": round(b.train_score, 5),
+        "validation_score": round(b.cv_mean, 5),
+        "gap": round(b.train_score - b.cv_mean, 5),
+    }
+
+
+def oof_correlation_between_runs(L: Ledger) -> dict[str, Any] | None:
+    """Computes pairwise Pearson correlation between OOF predictions of approved runs (up to 6)."""
+    app = [r for r in approved_runs(L) if r.oof_path and Path(r.oof_path).exists()][-6:]
+    if len(app) < 2:
+        return None
+    arrays: list[np.ndarray] = []
+    ids: list[str] = []
+    shapes: set[tuple[int, ...]] = set()
+    for r in app:
+        try:
+            arr = np.load(r.oof_path)
+            flat = arr.reshape(-1)
+            shapes.add(flat.shape)
+            arrays.append(flat)
+            ids.append(r.exp_id)
+        except Exception:
+            pass
+    if len(shapes) > 1:
+        return {"note": "skipped: OOF prediction shapes differ across runs"}
+    if len(arrays) < 2:
+        return None
+    data_mat = np.column_stack(arrays)
+    valid_mask = ~np.isnan(data_mat).any(axis=1)
+    if not np.any(valid_mask):
+        return {"note": "skipped: no overlapping valid OOF predictions"}
+    valid_data = data_mat[valid_mask]
+    corr = np.corrcoef(valid_data, rowvar=False)
+    matrix: dict[str, dict[str, float]] = {}
+    for i, id_i in enumerate(ids):
+        matrix[id_i] = {}
+        for j, id_j in enumerate(ids):
+            val = float(corr[i, j]) if not np.isnan(corr[i, j]) else 0.0
+            matrix[id_i][id_j] = round(val, 2)
+    return {"runs": ids, "matrix": matrix}
 
 
 def digest(L: Ledger, role: str, exp_id: str | None = None) -> dict:
+    from . import hw
+
     pr = L.problem
     d: dict = {"problem": {k: getattr(pr, k) for k in ("goal", "target", "metric", "direction", "task_type")}}
     s = L.strategy
     strat = {"validation": s.validation.model_dump(), "risks": s.risks, "domain_notes": s.domain_notes} if s else {}
-    if role == "profiler":
+    if role == "data_profiler":
         return d
-    if role == "strategist":
-        return {**d, "profile": profile_digest(L), "libraries": L.env.library_versions}
-    if role == "experimenter":
+    if role == "experiment_planner":
+        return {
+            **d,
+            "profile": profile_digest(L, max_notes=100),
+            "libraries": L.env.library_versions,
+            "budget": budget_digest(L),
+            "hardware": hw.describe(),
+            "seed": L.env.seed,
+        }
+    if role == "experiment_runner":
         b = best_run(L)
         return {**d, "strategy": strat, "profile": profile_digest(L),
                 "best_so_far": {"exp": b.exp_id, "cv": _r(b.cv_mean)} if b else None,
                 "libraries": L.env.library_versions}
-    if role == "validator":
+    if role == "run_validator":
         return {**d, "validation": strat.get("validation"), "runs": run_rows(L, only=exp_id)}
-    if role == "analyzer":
-        return {**d, "profile": profile_digest(L), "strategy": strat, "runs": run_rows(L, last=12),
-                "validation": [v.model_dump() for v in L.validation[-6:]],
-                "queue": [{"id": q.id, "kind": q.kind, "change": q.change[:100], "status": q.status}
-                          for q in L.queue[-25:]]}
+    if role == "results_analyzer":
+        pending_queue = [
+            {"id": q.id, "kind": q.kind, "change": q.change[:100], "status": q.status}
+            for q in L.queue if q.status == "pending"
+        ][-25:]
+        return {
+            **d,
+            "profile": profile_digest(L),
+            "strategy": strat,
+            "runs": curated_run_rows(L),
+            "validation": [v.model_dump() for v in L.validation[-6:]],
+            "queue": pending_queue,
+            "budget": budget_digest(L),
+            "hardware": hw.describe(),
+            "seed": L.env.seed,
+            "earlier_analyses": earlier_analyses_digest(L),
+            "gains_by_kind": gains_by_kind(L),
+            "per_fold_scores": per_fold_scores_digest(L),
+            "train_versus_validation_gap": train_val_gap_digest(L),
+            "oof_correlation_between_runs": oof_correlation_between_runs(L),
+        }
     return d

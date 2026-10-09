@@ -26,13 +26,21 @@ def _make_console() -> Console:
 
 console = _make_console()
 
-_COL = {"Profiler": "cyan", "Strategist": "magenta", "Experimenter": "green", "Validator": "yellow",
-        "Analyzer": "blue", "Docs": "bright_black", "Tuner": "bright_magenta",
-        "Finisher": "bright_green", "Controller": "white"}
+_COL = {
+    "Data Profiler": "cyan",
+    "Experiment Planner": "magenta",
+    "Experiment Runner": "green",
+    "Run Validator": "yellow",
+    "Results Analyzer": "blue",
+    "API Docs Lookup": "bright_black",
+    "Hyperparameter Tuner": "bright_magenta",
+    "Final Submission": "bright_green",
+    "Pipeline Controller": "white",
+}
 
 
 def say(agent: str, msg: str) -> None:
-    console.print(f"[bold {_COL.get(agent, 'white')}]●[/] [bold]{agent:<12}[/] {escape(msg)}")
+    console.print(f"[bold {_COL.get(agent, 'white')}]●[/] [bold]{agent:<20}[/] {escape(msg)}")
 
 
 def ok(msg: str) -> None:

@@ -35,9 +35,10 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 
 from . import config as cfgmod
-from . import doctor, lb, llm, ui
-from .build_graph import mermaid, run_pipeline
+from . import doctor, llm, ui
+from . import leaderboard_check as lb
 from .ledger import Workspace, experiments_used, load, load_control, save, session
+from .pipeline_graph import mermaid, run_pipeline
 from .state import Env, Ledger, Problem
 
 LIBS = ("numpy", "pandas", "scikit-learn", "lightgbm", "xgboost", "catboost", "optuna")
@@ -279,7 +280,7 @@ def status(path) -> None:
         ui.console.print(f"ensemble: {L.final.ensemble}\nsubmission: {L.final.submission_path}  checks: {L.final.checks}\n"
                          f"report: {L.final.report_path}")
     if ws.lb_path.exists():
-        ui.console.print(f"leaderboard: {ws.lb_path.read_text(encoding="utf-8")[:600]}")
+        ui.console.print(f"leaderboard: {ws.lb_path.read_text(encoding='utf-8')[:600]}")
 
 
 # ---- interactive session --------------------------------------------------------------------------------

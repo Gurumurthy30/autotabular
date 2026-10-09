@@ -1,4 +1,4 @@
-"""Finisher: ensemble (greedy weighted average on OOF, aligned via the fixed folds), submission.csv,
+"""Final Submission: ensemble (greedy weighted average on OOF, aligned via the fixed folds), submission.csv,
 format checks, report. Deterministic; the LLM only writes an optional summary paragraph."""
 
 from __future__ import annotations
@@ -9,7 +9,16 @@ import numpy as np
 import pandas as pd
 
 from .. import ensemble, ui
-from ..ledger import Workspace, approved_runs, best_run, load, ok_runs, run_rows, session, verdicts
+from ..ledger import (
+    Workspace,
+    approved_runs,
+    best_run,
+    load,
+    ok_runs,
+    run_rows,
+    session,
+    verdicts,
+)
 from ..llm import RateLimitError, get_llm
 from ..state import FinalResult
 
@@ -100,7 +109,7 @@ def _report(ws: Workspace, L, fin: FinalResult, summary: str) -> None:
 
 def run(ws: Workspace) -> None:
     L = load(ws)
-    ui.say("Finisher", "building ensemble and submission")
+    ui.say("Final Submission", "building ensemble and submission")
     fin = FinalResult(report_path=str(ws.report_path))
     cands = approved_runs(L) or []
     if not cands:                                           # best effort: validator unavailable or all rejected
@@ -125,7 +134,7 @@ def run(ws: Workspace) -> None:
             "candidates": table,
             "best_single_cv_same_rows": round(float(table["single"]), 5),
         }
-        ui.say("Finisher", f"{choice.name}: {fin.ensemble['weights']}  cv={choice.score:.4f}")
+        ui.say("Final Submission", f"{choice.name}: {fin.ensemble['weights']}  cv={choice.score:.4f}")
         raws = {k: ws.artifacts / f"{k}_test_raw.npy" for k in choice.members}
         if L.problem.test_path and all(p.exists() for p in raws.values()):
             test_arrs = {k: np.load(raws[k]) for k in choice.members}

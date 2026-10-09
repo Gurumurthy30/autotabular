@@ -13,6 +13,10 @@ Driven by a single local or remote LLM (default `gemma4:31b` or any compatible m
 
 ## Architecture & How It Works
 
+<p align="center">
+  <img src="assets/mlagent Autonomous ML Workflow Infographic.png" alt="mlagent Autonomous ML Workflow Infographic" width="100%">
+</p>
+
 `mlagent` orchestrates 8 specialized agents around a shared, immutable experiment ledger:
 
 ```
@@ -22,58 +26,72 @@ Driven by a single local or remote LLM (default `gemma4:31b` or any compatible m
                                  │
                                  ▼
                       ┌──────────────────────┐
-                      │    PROFILER AGENT    │  (Schema, distributions, leak risks)
+                      │    DATA PROFILER     │  (Schema, distributions, leak risks)
                       └──────────┬───────────┘
                                  │
                                  ▼
                       ┌──────────────────────┐
-                      │   STRATEGIST AGENT   │  (Hypothesis queue generation)
+                      │  EXPERIMENT PLANNER  │  (Hypothesis queue generation)
                       └──────────┬───────────┘
                                  │
                                  ▼
-            ┌─────────► ┌──────────────────┐
-            │           │   CONTROLLER     │ ◄─────────────────────────┐
-            │           └────────┬─────────┘                           │
-            │                    │ Batches ≤ workers                   │
-            │                    ▼                                     │
-            │           ┌──────────────────┐                           │
-            │           │   EXPERIMENTER   │                           │
-            │           │  & CODER AGENT   │                           │
-            │           └────────┬─────────┘                           │
-            │                    │                                     │
-            │                    ├─► [Crashes]                         │
-            │                    │     ├─► API Error ──► Docs Agent ───┤
-            │                    │     ├─► OOM Error ──► Downgrade ────┤
-            │                    │     └─► Logic Err ──► Analyzer ─────┤
-            │                    ▼                                     │
-            │           ┌──────────────────┐                           │
-            │           │ VALIDATOR AGENT  │                           │
-            │           └────────┬─────────┘                           │
-            │                    │                                     │
-            │                    ▼ (Every K runs)                      │
-            │           ┌──────────────────┐                           │
-            │           │  ANALYZER AGENT  ├───────────────────────────┘
-            │           └──────────────────┘
+            ┌─────────► ┌─────────────────────┐
+            │           │ PIPELINE CONTROLLER │ ◄─────────────────────────┐
+            │           └──────────┬──────────┘                           │
+            │                      │ Batches ≤ workers                    │
+            │                      ▼                                      │
+            │           ┌─────────────────────┐                           │
+            │           │  EXPERIMENT RUNNER  │                           │
+            │           │   & SCRIPT WRITER   │                           │
+            │           └──────────┬──────────┘                           │
+            │                      │                                      │
+            │                      ├─► [Crashes]                          │
+            │                      │     ├─► API Error ──► API Docs ──────┤
+            │                      │     ├─► OOM Error ──► Downgrade ─────┤
+            │                      │     └─► Logic Err ──► Analyzer ──────┤
+            │                      ▼                                      │
+            │           ┌─────────────────────┐                           │
+            │           │    RUN VALIDATOR    │                           │
+            │           └──────────┬──────────┘                           │
+            │                      │                                      │
+            │                      ▼ (Every K runs)                       │
+            │           ┌─────────────────────┐                           │
+            │           │  RESULTS ANALYZER   ├───────────────────────────┘
+            │           └─────────────────────┘
             │
             │ (Budget / Target reached)
             ▼
-┌──────────────────────┐
-│     TUNER AGENT      │  (Optuna hyperparameter study on top performers)
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│    FINISHER AGENT    │  (Single / Greedy / Voting / Stacking on exact folds)
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│   KAGGLE LB CHECK    │  (Detect CV/LB drift, upload final submission)
-└──────────┬───────────┘
-           │
-           ▼
-         [ END ]
+┌─────────────────────────┐
+│  HYPERPARAMETER TUNER   │  (Optuna hyperparameter study on top performers)
+└───────────┬─────────────┘
+            │
+            ▼
+┌─────────────────────────┐
+│    FINAL SUBMISSION     │  (Single / Greedy / Voting / Stacking on exact folds)
+└───────────┬─────────────┘
+            │
+            ▼
+┌─────────────────────────┐
+│    LEADERBOARD CHECK    │  (Detect CV/LB drift, upload final submission)
+└───────────┬─────────────┘
+            │
+            ▼
+          [ END ]
 ```
+
+### Specialized Agents
+
+| Agent Name | Module | Role & Responsibility |
+|---|---|---|
+| **Data Profiler** | `data_profiler.py` | Audits dataset schema, column types, leak risks, modalities, and tagged distribution notes. |
+| **Experiment Planner** | `experiment_planner.py` | Determines CV strategy (stratified, grouped, temporal) and populates the initial experiment queue. |
+| **Script Writer** | `script_writer.py` | Generates self-contained, executable Python scripts for model training and feature engineering. |
+| **Experiment Runner** | `experiment_runner.py` | Executes experiment scripts in isolated child processes with hardware and timeout monitoring. |
+| **Run Validator** | `run_validator.py` | Verifies run outputs for target leakage, OOF sanity, submission shape, and valid score metrics. |
+| **Results Analyzer** | `results_analyzer.py` | Identifies performance bottlenecks and dynamically introduces refined hypotheses to the queue. |
+| **API Docs Lookup** | `api_docs_lookup.py` | Inspects local library signatures and consults curated documentation upon execution failures. |
+| **Hyperparameter Tuner** | `hyperparameter_tuner.py` | Runs Optuna optimization studies on top-performing models using identical validation folds. |
+| **Final Submission** | `final_submission.py` | Ensembles best models (Single, Greedy, Voting, Stacking) and generates `submission.csv` and `report.md`. |
 
 ---
 
@@ -82,9 +100,9 @@ Driven by a single local or remote LLM (default `gemma4:31b` or any compatible m
 - **Autonomous End-to-End Pipeline**: From raw CSV to cross-validated feature engineering, model training, Optuna tuning, and stacking.
 - **Strictly Honest Cross-Validation**: Fixed `folds.json` and `holdout.json` partition created up-front. All candidates, feature steps, and ensemble layers are evaluated strictly out-of-fold.
 - **Self-Healing Execution Loop**:
-  - **API / Syntax Errors**: Triggers the **Docs Agent** (local introspection first, allowlisted official doc search fallback).
+  - **API / Syntax Errors**: Triggers the **API Docs Lookup** agent (local introspection first, allowlisted official doc search fallback).
   - **OOM / Resource Limits**: Applies automatic level downgrades (Level 1: lighter hyperparameters; Level 2: CPU fallback).
-  - **Logic Errors**: The **Analyzer Agent** triages failure causes and dynamically queues counter-hypotheses.
+  - **Logic Errors**: The **Results Analyzer** agent triages failure causes and dynamically queues counter-hypotheses.
 - **Cross-Platform & Windows Native**: Full UTF-8 support across all file I/O and terminal outputs (`safe_box=True`, `sys.stdout.reconfigure`), eliminating Windows `cp1252` encoding pitfalls.
 - **`<think>` Tag Stripping & Robust JSON Extraction**: Seamless compatibility with reasoning models (DeepSeek-R1, Gemma 4, Qwen).
 - **Ensemble Engine**: Evaluates Single Best, Greedy Forward Selection, Voting, and Ridge Stacking. A more complex ensemble is rejected unless it demonstrably outperforms the best single model on identical rows.
@@ -163,7 +181,7 @@ Flags:
 - `--id-col <column>`: Row identifier column (excluded from training features).
 - `--test <path>`: Optional test CSV for final submission predictions.
 - `--workers <int>`: Concurrency level for parallel script execution (default: 1).
-- `--yes`, `-y`: Non-interactive mode (auto-approves initial strategist plan).
+- `--yes`, `-y`: Non-interactive mode (auto-approves initial experiment plan).
 - `--max-experiments <int>`: Cap on total experiment hypotheses to try.
 
 ### Resuming an Interrupted Run

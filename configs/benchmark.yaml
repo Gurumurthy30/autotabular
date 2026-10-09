@@ -1,0 +1,36 @@
+# Preset benchmark configuration from commit 6cfacf2
+# Cloud endpoint requires OLLAMA_API_KEY environment variable.
+model:
+  tag: gemma4:31b-cloud          # cloud-hosted model; requires OLLAMA_API_KEY
+  host: null                     # env OLLAMA_HOST overrides; API key via env OLLAMA_API_KEY
+  temperature: 0.2
+seed: 42
+target_score: null               # stop early once the best CV reaches this (else read from goal text)
+budget:
+  max_experiments: 24            # ~2 min per experiment fits in the 51 min loop
+  max_minutes: 60                # reduced from 120; raise to 90 for large datasets
+  plateau_n: 4                   # approved runs without a counted gain (a bit more patience)
+  analyze_every: 4               # K: Analyzer every K runs (fewer LLM calls, more time for training)
+  tune_top_n: 3
+  tune_trials: 30                # enough for a decent Optuna-style search on top models
+  max_consecutive_crashes: 3
+  loop_fraction: 0.85            # loop ends at ~51 min; ~9 min left for tuning + finisher
+  # Deep text/image/audio runs need larger values (leave at 15 for now)
+  max_run_minutes: 15
+  tune_minutes_per_model: 15
+parallel:
+  workers: 1                     # set 2 if you have 4+ CPU cores or a spare GPU
+docs:
+  web: true                      # official docs fallback when local introspection is not enough
+  web_timeout: 15
+hardware:
+  oom_downgrade: true            # CUDA/RAM OOM -> retry smaller, then CPU + lighter model
+  max_oom_retries: 2
+finisher:
+  methods: [greedy, voting, stacking]
+  voting_top_k: 5
+kaggle:
+  competition: null              # e.g. titanic
+  submit: false                  # needs kaggle CLI + ~/.kaggle/kaggle.json
+  wait_seconds: 180
+  gap_rel: 0.02

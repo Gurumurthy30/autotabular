@@ -18,3 +18,22 @@ mlagent = "mlagent.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["mlagent*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+ignore = [
+    "BLE001",  # Catching general Exception is intentional in resilience loops & diagnostics
+    "S110",    # try-except-pass is intentional when ignoring corrupted or non-matching auxiliary files
+    "S112",    # try-except-continue is intentional during column leak check scanning
+    "PLW1510", # subprocess.run without check=True (return codes explicitly inspected)
+    "DTZ005",  # datetime.datetime.now() without tz parameter
+    "RUF100",  # Unused noqa directives across environments
+]

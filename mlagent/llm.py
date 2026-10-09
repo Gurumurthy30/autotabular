@@ -26,13 +26,12 @@ class LLMFormatError(RuntimeError):
 
 def _strip_think(text: str) -> str:
     """Remove <think>...</think> reasoning blocks emitted by some models (e.g. Gemma)."""
-    import re as _re
-    return _re.sub(r"<think>.*?</think>", "", text, flags=_re.S).strip()
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
 def extract_json(text: str) -> dict:
     text = _strip_think(text)
-    m = re.search(r"```(?:json)?\s*\n(.*?)```", text, re.S)
+    m = re.search(r"```(?:json)?\s*\n(.*?)```", text, re.DOTALL)
     if m:
         text = m.group(1)
     i, j = text.find("{"), text.rfind("}")
@@ -43,7 +42,7 @@ def extract_json(text: str) -> dict:
 
 def extract_code(text: str) -> str:
     text = _strip_think(text)
-    blocks = re.findall(r"```(?:python|py)?[ \t]*\n(.*?)```", text, re.S)
+    blocks = re.findall(r"```(?:python|py)?[ \t]*\n(.*?)```", text, re.DOTALL)
     if blocks:
         return max(blocks, key=len).strip() + "\n"
     return re.sub(r"^```\w*\n", "", text.strip()).rstrip("`").strip() + "\n"   # unterminated fence
@@ -83,7 +82,7 @@ class LLM:
                                        messages=[{"role": "system", "content": system},
                                                  {"role": "user", "content": user}])
                 return r["message"]["content"]
-            except Exception as e:                                   # noqa: BLE001
+            except Exception as e:
                 if getattr(e, "status_code", None) == 429 or "429" in str(e)[:120]:
                     if attempt == len(delays):
                         raise RateLimitError(str(e)) from e

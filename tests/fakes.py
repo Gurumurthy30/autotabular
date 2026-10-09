@@ -84,7 +84,6 @@ class FakeLLM:
             return model(bottleneck="variance", evidence="fake", hypotheses=[
                 {"hypothesis": f"more trees {self.calls}", "change": f"use {700 + self.calls} trees", "kind": "model", "base": "best"}])
         if n == "DocQuery":
-            m = re.search(r"No module|sklearn|NoSuch", user)
             return model(library="sklearn", objects=["sklearn.ensemble.NoSuchClass" if "NoSuchClass" in user
                                                      else "sklearn.ensemble.RandomForestClassifier"])
         raise AssertionError(n)

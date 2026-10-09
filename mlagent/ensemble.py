@@ -13,8 +13,8 @@ OOF value), so time-series folds (early rows have no OOF) compare fairly.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression, Ridge
@@ -73,7 +73,7 @@ def _greedy(oofs, y, kit, d, mask, rounds: int = 10) -> Result:
         counts[cand[1]] = counts.get(cand[1], 0) + 1
     tot = sum(counts.values())
     w = {k: v / tot for k, v in counts.items()}
-    predict = lambda arrs, w=w: sum(wt * arrs[k] for k, wt in w.items())          # noqa: E731
+    predict = lambda arrs, w=w: sum(wt * arrs[k] for k, wt in w.items())
     return Result("greedy", list(w), w, predict(oofs), predict)
 
 
@@ -101,7 +101,7 @@ def _voting(oofs, y, kit, d, mask, top_k: int) -> Result:
 def _stacking(oofs, y, kit, d, mask, folds) -> Result | None:
     ids, n = list(oofs), len(y)
     clf, k = kit.TASK != "regression", len(kit.CLASSES)
-    feats = lambda arrs: np.hstack([arrs[i] if arrs[i].ndim == 2 else arrs[i][:, None] for i in ids])   # noqa: E731
+    feats = lambda arrs: np.hstack([arrs[i] if arrs[i].ndim == 2 else arrs[i][:, None] for i in ids])
     mk = (lambda: LogisticRegression(C=1.0, max_iter=1000)) if clf else (lambda: Ridge(alpha=1.0))
 
     def pred(model, Z):

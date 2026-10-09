@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 
 from pydantic import Field
 
@@ -31,7 +30,7 @@ PROMPT_QUERY_SYSTEM = (
 )
 
 PROMPT_SHEET_SYSTEM = (
-    "You are the DOCS agent writing a short, VERIFIED cheat sheet for a coder who just hit an API error "
+    "You are the API DOCS LOOKUP agent writing a short, VERIFIED cheat sheet for the Script Writer who just hit an API error "
     "with this INSTALLED library version. Use ONLY facts from inspected signatures/docstrings or verified docs text. "
     "The local inspection describes the installed version and wins on any conflict.\n\n"
     "Rules (250 words or fewer):\n"
@@ -126,7 +125,7 @@ def lookup(ws: Workspace, error: str, exp_id: str | None = None) -> str | None:
         m = re.findall(r"site-packages/(\w+)/", error)
         lib = m[-1] if m else "sklearn"
     objs = [o for o in q.objects if o.startswith(lib)][:5] or [lib]
-    ui.say("Docs", f"inspecting installed {lib}: {', '.join(objs)}")
+    ui.say("API Docs Lookup", f"inspecting installed {lib}: {', '.join(objs)}")
     prior_crashes = [r for r in L.runs if r.exp_id == exp_id and r.error] if exp_id else []
     force_web = len(prior_crashes) >= 2
     sheet = _sheet(lib, _gather(ws, lib, objs, lib, force_web=force_web))
@@ -140,7 +139,7 @@ def ensure(ws: Workspace, libs: list[str]) -> None:
     L = load(ws)
     for lib in libs:
         if lib in RARE_LIBS and lib in L.env.library_versions and lib not in L.docs:
-            ui.say("Docs", f"building cheat sheet for {lib} (first use)")
+            ui.say("API Docs Lookup", f"building cheat sheet for {lib} (first use)")
             sheet = _sheet(lib, _gather(ws, lib, RARE_OBJECTS[lib], lib))
             with session(ws) as L2:
                 L2.docs[lib] = sheet

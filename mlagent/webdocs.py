@@ -7,6 +7,7 @@ import re
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
+from typing import ClassVar
 
 ALLOWED = {"scikit-learn.org", "lightgbm.readthedocs.io", "xgboost.readthedocs.io", "catboost.ai",
            "optuna.readthedocs.io", "pandas.pydata.org", "numpy.org", "docs.scipy.org"}
@@ -50,8 +51,8 @@ def candidate_urls(lib: str, objects: list[str]) -> list[str]:
 
 
 class _Text(HTMLParser):
-    SKIP = {"script", "style", "nav", "header", "footer", "aside", "noscript", "svg"}
-    BLOCK = {"p", "div", "li", "tr", "br", "h1", "h2", "h3", "h4", "pre", "dt", "dd", "section"}
+    SKIP: ClassVar[frozenset[str]] = frozenset({"script", "style", "nav", "header", "footer", "aside", "noscript", "svg"})
+    BLOCK: ClassVar[frozenset[str]] = frozenset({"p", "div", "li", "tr", "br", "h1", "h2", "h3", "h4", "pre", "dt", "dd", "section"})
 
     def __init__(self):
         super().__init__()
@@ -94,7 +95,7 @@ def fetch_text(url: str, timeout: int = 15, max_chars: int = 6000) -> str | None
         return None
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "mlagent-docs/0.1"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:         # noqa: S310 — allowlisted above
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             if r.status != 200:
                 return None
             raw = r.read(400_000).decode("utf-8", "replace")

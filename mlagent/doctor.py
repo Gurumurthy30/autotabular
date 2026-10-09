@@ -19,7 +19,7 @@ try:
 except ImportError:
     pass
 
-from . import hw, llm, ui
+from . import hw, llm
 
 # Reconfigure stdout/stderr on Windows to avoid charmap / cp1252 crashes
 if sys.platform == "win32":

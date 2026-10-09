@@ -12,12 +12,12 @@ from pydantic import BaseModel, ConfigDict, Field
 TaskType = Literal["binary", "multiclass", "multilabel", "regression", "ordinal", "other"]
 Direction = Literal["maximize", "minimize"]
 CVKind = Literal["kfold", "stratified", "group", "stratified_group", "time"]
-ExpKind = Literal["feature", "model", "tune"]
-ExpStatus = Literal["pending", "running", "done", "failed"]
-QueueSource = Literal["strategist", "analyzer"]
-RunSource = Literal["experimenter", "tuner"]
-VerdictKind = Literal["approve", "reject"]
-RunStatus = Literal["running", "done", "stopped"]
+ExpKind = Literal["feature", "model", "tune"]  # persisted in ledger.json: do not rename
+ExpStatus = Literal["pending", "running", "done", "failed"]  # persisted in ledger.json: do not rename
+QueueSource = Literal["strategist", "analyzer"]  # persisted in ledger.json: do not rename
+RunSource = Literal["experimenter", "tuner"]  # persisted in ledger.json: do not rename
+VerdictKind = Literal["approve", "reject"]  # persisted in ledger.json: do not rename
+RunStatus = Literal["running", "done", "stopped"]  # persisted in ledger.json: do not rename
 
 
 class Base(BaseModel):
@@ -47,6 +47,8 @@ class Budget(Base):
     tune_trials: int = 20     # search trials per tuned model
     max_consecutive_crashes: int = 3
     loop_fraction: float = 0.85   # loop stops at this share of max_minutes; rest is for Tuner + Finisher
+    max_run_minutes: int = 15
+    tune_minutes_per_model: int = 15
 
 
 class Env(Base):
@@ -97,8 +99,8 @@ class QueueItem(Base):
     kind: ExpKind
     params: dict[str, Any] = Field(default_factory=dict)
     base: str | None = None            # exp_id this builds on (hill-climbing)
-    status: ExpStatus = "pending"
-    source: QueueSource = "strategist"
+    status: ExpStatus = "pending"      # persisted in ledger.json: do not rename
+    source: QueueSource = "strategist" # persisted in ledger.json: do not rename
 
 
 class Run(Base):
@@ -113,7 +115,9 @@ class Run(Base):
     seconds: float = 0.0
     seed: int = 42
     error: str | None = None           # a crash is a Run with error, not a CV attempt
-    source: RunSource = "experimenter"
+    source: RunSource = "experimenter" # persisted in ledger.json: do not rename
+    fold_scores: list[float] | None = None  # per-fold validation scores
+    train_score: float | None = None        # mean train score if available
 
 
 # ---- validation / analysis (Validator, Analyzer) ---------------------------

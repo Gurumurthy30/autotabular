@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Protocol
 
 from . import ui
-from .agents import analyzer
+from .agents import results_analyzer as analyzer
 from .executor import tail
 from .ledger import Workspace, best_run, load, session
 from .llm import RateLimitError
@@ -115,9 +115,9 @@ def record(ws: Workspace, lb_score: float, note: str = "") -> dict:
     if entry["flagged"]:
         try:
             analyzer.run(ws, "cv_lb_gap", error=json.dumps(entry))
-            ui.say("Analyzer", "cv/lb gap hypotheses queued — `mlagent resume --more 5` to test them")
+            ui.say("Results Analyzer", "cv/lb gap hypotheses queued — `mlagent resume --more 5` to test them")
         except RateLimitError:
-            ui.warn("rate limited: could not run the Analyzer on the gap")
+            ui.warn("rate limited: could not run the Results Analyzer on the gap")
     return entry
 
 

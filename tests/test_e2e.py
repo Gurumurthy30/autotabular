@@ -13,14 +13,19 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fakes import FakeLLM, make_data  # noqa: E402
-from mlagent import cli, lb, llm  # noqa: E402
+
+from mlagent import cli, llm  # noqa: E402
 from mlagent import config as cfgmod  # noqa: E402
+from mlagent import leaderboard_check as lb
 from mlagent.ledger import Workspace, experiments_used, load, load_control  # noqa: E402
 
 
 def ns(**kw):
-    base = dict(yes=True, fresh=True, max_experiments=6, max_minutes=30, seed=None, workers=None, model=None,
-                target=None, metric=None, goal=None, test=None, id_col=None, sample_submission=None)
+    base = {
+        "yes": True, "fresh": True, "max_experiments": 6, "max_minutes": 30, "seed": None, "workers": None,
+        "model": None, "target": None, "metric": None, "goal": None, "test": None, "id_col": None,
+        "sample_submission": None,
+    }
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -39,6 +44,7 @@ def _reset():
     llm.set_llm(None)
 
 
+@pytest.mark.slow
 def test_full_pipeline_docs_lightgbm_optuna_ensembles(tmp_path):
     fake = FakeLLM(api_exp="e003", lightgbm_hyp=True, optuna_tuner=True)
     ws, L = run(tmp_path, fake=fake)
@@ -118,6 +124,7 @@ def test_rate_limit_stops_gracefully_then_resume_finishes(tmp_path):
     assert not any(q.status == "running" for q in L2.queue)
 
 
+@pytest.mark.slow
 def test_resume_more_reopens_a_finished_run(tmp_path):
     ws, L = run(tmp_path, max_experiments=3)
     n = experiments_used(L)

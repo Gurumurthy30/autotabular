@@ -27,9 +27,7 @@ ENV/
 !.env.example
 
 # other things
-ML_AGENT_PLAN.md
-AUDIT.md
 notebook/
 sample_data/
-mlagent_prompt_pack.md
-output_summary.csv
+docs/
+.ruff_cache/

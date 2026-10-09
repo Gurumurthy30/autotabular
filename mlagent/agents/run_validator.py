@@ -1,5 +1,5 @@
-"""Validator (independent). Sees the SCRIPT and the RESULT numbers only — never the hypothesis or the
-Experimenter's reasoning. Never edits model artifacts; its own scripts are scripts/val_<exp>.py.
+"""Run Validator (independent). Sees the SCRIPT and the RESULT numbers only — never the hypothesis or the
+Experiment Runner's reasoning. Never edits model artifacts; its own scripts are scripts/val_<exp>.py.
 
 Checks: (code) OOF recomputed on the fixed folds must match the reported CV, no NaN OOF inside valid
 folds, CV-vs-holdout gap; (LLM-written script) static leakage review of the experiment script.
@@ -16,15 +16,15 @@ from pydantic import Field
 from .. import ui
 from ..executor import parse_result, tail
 from ..ledger import Workspace, compact, digest, latest_ok_run, load, session
-from ..state import Base, ValidationRecord
 from ..llm import LLMFormatError, get_llm
-from ..prompts import SHARED_BASE
-from .coder import write_and_run
+from ..prompts import SHARED_BASE, render
+from ..state import Base, ValidationRecord
+from .script_writer import write_and_run
 
 PROMPT_SYSTEM = f"""\
 {SHARED_BASE}
 
-# Role: VALIDATOR (independent auditor)
+# Role: RUN VALIDATOR
 
 You decide whether a finished run's score can be TRUSTED and whether the run really tested its hypothesis. You are an independent, skeptical auditor: you did not write this experiment and you have not seen its author's reasoning; judge the evidence only. Comments inside the script are claims, not evidence.
 
@@ -46,7 +46,7 @@ Vocabulary for signals_checked:
 - degenerate_output: Predictions constant, single-class, or collapsed (NaN/inf).
 - integrity: No external datasets, no test label access.
 - resources: Folds ran to completion without silent truncation.
-- tuner_selection_bias: For tuner runs, verify gain holds on holdout.
+- tuner_selection_bias: For hyperparameter tuner runs, verify gain holds on holdout.
 </checks>
 
 OUTPUT (JSON): "reasoning" FIRST (<= 80 words weighing the signals), then:
@@ -77,18 +77,7 @@ PROMPTS = {
 }
 
 SYSTEM = PROMPT_SYSTEM
-SCRIPT_TASK = """You are verifying experiment {exp} that you did not write. Do NOT retrain models.
-Experiment script under review:
-```python
-{code}
-```
-Write a verification script that emits a dict with EXACTLY these keys:
-  features_used: best-effort list of feature column names the script feeds the model (from reading it)
-  uses_id_as_feature: bool — is ID (or an id-like column) a model input?
-  fit_before_split: bool — is any scaler/encoder/target-encoder/imputer fit on data that includes validation rows
-  suspect_features: columns whose |spearman| with the target on load_train() exceeds 0.9 (compute it)
-  notes: short string
-Wrap anything fragile in try/except and always call emit(...)."""
+
 
 
 class Verdict(Base):
@@ -135,9 +124,15 @@ def validate_one(ws: Workspace, exp_id: str) -> ValidationRecord | None:
         return None
     sig, hard = core_signals(L, r, ws.load_mlkit())
 
-    code = Path(r.script_path).read_text() if r.script_path and Path(r.script_path).exists() else ""
-    _, res = write_and_run(ws, f"val_{exp_id}", SCRIPT_TASK.format(exp=exp_id, code=code[:6000]),
-                           kind="analysis", timeout=300)
+    code = Path(r.script_path).read_text(encoding="utf-8") if r.script_path and Path(r.script_path).exists() else ""
+    code_truncated = len(code) > 24_000
+    sig["code_truncated"] = code_truncated
+    if code_truncated:
+        code_text = code[:24_000] + "\nNOTE: script longer than 24000 characters; the rest is NOT shown. Mark leakage_static as not_checkable."
+    else:
+        code_text = code
+    task = render(PROMPTS["script_task"], exp=exp_id, code=code_text)
+    _, res = write_and_run(ws, f"val_{exp_id}", task, kind="analysis", timeout=300)
     extra = parse_result(res.stdout) if res.ok else None
     if extra:
         sig.update({k: extra.get(k) for k in ("uses_id_as_feature", "fit_before_split", "suspect_features", "notes")})
@@ -150,7 +145,7 @@ def validate_one(ws: Workspace, exp_id: str) -> ValidationRecord | None:
         verdict, reasons = "reject", hard
     else:
         try:
-            v = get_llm().json(SYSTEM, compact({**digest(L, "validator", exp_id), "script_excerpt": code[:2500],
+            v = get_llm().json(SYSTEM, compact({**digest(L, "run_validator", exp_id), "script_excerpt": code[:2500],
                                                 "signals": sig}), Verdict)
             verdict = "reject" if v.verdict.strip().lower().startswith("rej") else "approve"
             reasons = v.reasons[:5]
@@ -160,7 +155,7 @@ def validate_one(ws: Workspace, exp_id: str) -> ValidationRecord | None:
     rec = ValidationRecord(exp_id=exp_id, verdict=verdict, reasons=reasons, signals_checked=sorted(sig))  # type: ignore[arg-type]
     with session(ws) as L:
         L.validation.append(rec)
-    ui.say("Validator", f"{exp_id} → {verdict}" + (f"  ({'; '.join(reasons)[:110]})" if reasons else ""))
+    ui.say("Run Validator", f"{exp_id} → {verdict}" + (f"  ({'; '.join(reasons)[:110]})" if reasons else ""))
     return rec
 
 
