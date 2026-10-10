@@ -118,8 +118,8 @@ Clone the repository and set up a Python 3.10+ virtual environment:
 
 ```bash
 # Clone the repository
-git clone https://github.com/Gurumurthy30/ML_agent.git
-cd ML_agent
+git clone https://github.com/Gurumurthy30/mlagent.git
+cd mlagent
 
 # Create and activate virtual environment
 python -m venv .venv
